@@ -28,7 +28,7 @@ def install_test(root):
         except FileNotFoundError:
             old_path, old_type = None, winreg.REG_EXPAND_SZ
     try:
-        run("make", "install", env=env)
+        print(run("make", "install", env=env))
         init = config / "init.lua"
         assert init.is_file()
         init.write_text("-- preserved\n", encoding="utf-8")
@@ -39,7 +39,7 @@ def install_test(root):
         if registry:
             path, _ = winreg.QueryValueEx(registry, "Path")
             parts = [p.rstrip("\\").casefold() for p in path.split(";")]
-            assert parts.count(str(binary.parent).rstrip("\\").casefold()) == 1
+            assert parts.count(str(binary.parent).rstrip("\\").casefold()) == 1, f"Expected {binary.parent}; fvim entries: {[p for p in parts if 'fvim' in p]}"
             fresh = dict(env, PATH=path + ";" + os.environ["PATH"])
             assert run("fvim", "--version", env=fresh) == "fvim 0.1.0"
         else:
@@ -59,6 +59,27 @@ def install_test(root):
                 winreg.SetValueEx(registry, "Path", 0, old_type, old_path)
             registry.Close()
 
+
+
+def sudo_install_test(root):
+    if os.name == "nt":
+        return
+    import shutil
+    if not shutil.which("sudo"):
+        return
+    if subprocess.run(["sudo", "-n", "true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+        print("Sudo install unavailable on this runner.")
+        return
+    root.chmod(0o755)
+    prefix = root / "sudo-prefix"
+    config = root / "sudo-config"
+    run("sudo", "-n", "make", "install",
+        f"FVIM_PREFIX={prefix}", f"FVIM_CONFIG_DIR={config}", "FVIM_NO_PATH=1")
+    init = config / "init.lua"
+    assert init.is_file()
+    assert init.stat().st_uid == os.getuid(), "Sudo installation must create user-owned config."
+    assert run(str(prefix / "bin/fvim"), "--version") == "fvim 0.1.0"
+    print("Sudo install and invoking-user configuration ownership passed.")
 
 
 def windows_terminal_test(binary, root):
@@ -277,4 +298,5 @@ with tempfile.TemporaryDirectory(prefix="fvim-ci-") as directory:
     root = Path(directory)
     executable = install_test(root)
     terminal_test(executable, root)
+    sudo_install_test(root)
 print("Install, PATH and configuration tests passed.")

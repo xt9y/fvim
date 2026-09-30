@@ -10,7 +10,9 @@ struct Sandbox(PathBuf);
 impl Sandbox {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "fvim-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)
+            "fvim-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&path).unwrap();
         Self(path)
@@ -37,7 +39,11 @@ fn installation_is_repeatable_and_preserves_config() {
             .env_remove("SUDO_USER")
             .output()
             .unwrap();
-        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
         let init = config.join("init.lua");
         if pass == 0 {
             assert!(init.is_file());
@@ -46,10 +52,15 @@ fn installation_is_repeatable_and_preserves_config() {
             assert_eq!(fs::read_to_string(init).unwrap(), "-- keep my config\n");
         }
     }
-    let executable = prefix.join("bin").join(if cfg!(windows) { "fvim.exe" } else { "fvim" });
+    let executable = prefix
+        .join("bin")
+        .join(if cfg!(windows) { "fvim.exe" } else { "fvim" });
     let result = Command::new(executable).arg("--version").output().unwrap();
     assert!(result.status.success());
-    assert_eq!(String::from_utf8(result.stdout).unwrap().trim(), "fvim 0.1.0");
+    assert_eq!(
+        String::from_utf8(result.stdout).unwrap().trim(),
+        "fvim 0.1.0"
+    );
 }
 
 #[test]
@@ -61,8 +72,25 @@ fn config_location_and_noninteractive_failure() {
         .output()
         .unwrap();
     assert!(result.status.success());
-    assert_eq!(String::from_utf8(result.stdout).unwrap().trim(), sandbox.0.join("init.lua").to_string_lossy());
+    assert_eq!(
+        String::from_utf8(result.stdout).unwrap().trim(),
+        sandbox.0.join("init.lua").to_string_lossy()
+    );
     let result = Command::new(env!("CARGO_BIN_EXE_fvim")).output().unwrap();
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("requires a terminal"));
+}
+
+#[test]
+fn default_platform_config_location_is_created() {
+    let sandbox = Sandbox::new();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_fvim"));
+    command.arg("--init-config").env_remove("FVIM_CONFIG_DIR").env("FVIM_NO_PATH", "1");
+    #[cfg(windows)]
+    command.env("LOCALAPPDATA", &sandbox.0);
+    #[cfg(not(windows))]
+    command.env("XDG_CONFIG_HOME", &sandbox.0);
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(sandbox.0.join("fvim/init.lua").is_file());
 }

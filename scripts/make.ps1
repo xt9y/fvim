@@ -26,9 +26,5 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
 switch ($Target) {
     'build' { & cargo build --release --locked }
     'test' { & cargo test --locked }
-    'install' {
-        if (-not (Test-Path target/release/fvim.exe)) { throw 'Run make before make install.' }
-        & ./target/release/fvim.exe --install
-    }
 }
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

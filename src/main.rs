@@ -4,7 +4,10 @@ mod install;
 use buffer::Buffer;
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
-    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
+        KeyModifiers,
+    },
     execute, queue,
     style::{Attribute, Print, ResetColor, SetAttribute},
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
@@ -21,14 +24,26 @@ impl Terminal {
     fn enter() -> io::Result<Self> {
         terminal::enable_raw_mode()?;
         let guard = Self;
-        execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste, Hide)?;
+        execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            Hide
+        )?;
         Ok(guard)
     }
 }
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        let _ = execute!(io::stdout(), ResetColor, SetAttribute(Attribute::Reset), Show, DisableBracketedPaste, LeaveAlternateScreen);
+        let _ = execute!(
+            io::stdout(),
+            ResetColor,
+            SetAttribute(Attribute::Reset),
+            Show,
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
         let _ = terminal::disable_raw_mode();
     }
 }
@@ -44,7 +59,9 @@ fn char_width(ch: char, column: usize) -> usize {
 }
 
 fn display_column(line: &str, chars: usize) -> usize {
-    line.chars().take(chars).fold(0, |col, ch| col + char_width(ch, col))
+    line.chars()
+        .take(chars)
+        .fold(0, |col, ch| col + char_width(ch, col))
 }
 
 fn visible_line(line: &str, left: usize, width: usize) -> String {
@@ -105,13 +122,30 @@ fn render(buffer: &Buffer, top: &mut usize, left: &mut usize, message: &str) -> 
             queue!(out, Print("~"))?;
         }
     }
-    let name = buffer.path.as_ref().and_then(|p| p.file_name()).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "[No Name]".to_owned());
-    let status = format!(" {}{} | {}:{} | Ctrl-S save  Ctrl-Q quit  Ctrl-Z undo",
-        name, if buffer.dirty() { " [+]" } else { "" }, buffer.row + 1, buffer.col + 1);
-    queue!(out, MoveTo(0, height - 2), SetAttribute(Attribute::Reverse),
-        Print(visible_line(&status, 0, columns)), SetAttribute(Attribute::Reset),
-        MoveTo(0, height - 1), Print(visible_line(message, 0, columns)),
-        MoveTo((cursor - *left) as u16, (buffer.row - *top) as u16), Show)?;
+    let name = buffer
+        .path
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "[No Name]".to_owned());
+    let status = format!(
+        " {}{} | {}:{} | Ctrl-S save  Ctrl-Q quit  Ctrl-Z undo",
+        name,
+        if buffer.dirty() { " [+]" } else { "" },
+        buffer.row + 1,
+        buffer.col + 1
+    );
+    queue!(
+        out,
+        MoveTo(0, height - 2),
+        SetAttribute(Attribute::Reverse),
+        Print(visible_line(&status, 0, columns)),
+        SetAttribute(Attribute::Reset),
+        MoveTo(0, height - 1),
+        Print(visible_line(message, 0, columns)),
+        MoveTo((cursor - *left) as u16, (buffer.row - *top) as u16),
+        Show
+    )?;
     out.flush()
 }
 
@@ -158,13 +192,19 @@ fn edit(path: Option<PathBuf>) -> io::Result<()> {
                     KeyCode::Down => buffer.move_cursor(0, 1),
                     KeyCode::Home => buffer.col = 0,
                     KeyCode::End => buffer.col = buffer.lines[buffer.row].chars().count(),
-                    KeyCode::PageUp => buffer.move_cursor(0, -(terminal::size()?.1.saturating_sub(2) as isize)),
-                    KeyCode::PageDown => buffer.move_cursor(0, terminal::size()?.1.saturating_sub(2) as isize),
+                    KeyCode::PageUp => {
+                        buffer.move_cursor(0, -(terminal::size()?.1.saturating_sub(2) as isize))
+                    }
+                    KeyCode::PageDown => {
+                        buffer.move_cursor(0, terminal::size()?.1.saturating_sub(2) as isize)
+                    }
                     KeyCode::Enter => buffer.insert("\n"),
                     KeyCode::Backspace => buffer.backspace(),
                     KeyCode::Delete => buffer.delete(),
                     KeyCode::Tab => buffer.insert("\t"),
-                    KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::ALT) => buffer.insert(&ch.to_string()),
+                    KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::ALT) => {
+                        buffer.insert(&ch.to_string())
+                    }
                     _ => {}
                 }
             }
@@ -182,12 +222,16 @@ fn run() -> io::Result<()> {
     let first = args.next();
     match first.as_deref().and_then(|s| s.to_str()) {
         Some("--version") => println!("fvim {}", env!("CARGO_PKG_VERSION")),
-        Some("--help") | Some("-h") => println!("fvim [file]\nCtrl-S save | Ctrl-Q quit | Ctrl-Z undo\n--version | --config-path"),
+        Some("--help") | Some("-h") => println!(
+            "fvim [file]\nCtrl-S save | Ctrl-Q quit | Ctrl-Z undo\n--version | --config-path"
+        ),
         Some("--config-path") => println!("{}", install::config_dir()?.join("init.lua").display()),
         Some("--install") => install::install()?,
         Some("--init-config") => install::init_config()?,
         Some("--") => return edit(args.next().map(PathBuf::from)),
-        Some(arg) if arg.starts_with('-') => return Err(io::Error::other(format!("Unknown option: {arg}"))),
+        Some(arg) if arg.starts_with('-') => {
+            return Err(io::Error::other(format!("Unknown option: {arg}")))
+        }
         _ => {
             if args.next().is_some() {
                 return Err(io::Error::other("Stage 1 opens one file at a time."));

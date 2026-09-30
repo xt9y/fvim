@@ -4,7 +4,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const DEFAULT_CONFIG: &str = "-- fvim configuration\n-- Lua execution and Neovim settings arrive in a later stage.\n";
+const DEFAULT_CONFIG: &str =
+    "-- fvim configuration\n-- Lua execution and Neovim settings arrive in a later stage.\n";
 
 pub fn config_dir() -> io::Result<PathBuf> {
     if let Some(path) = env::var_os("FVIM_CONFIG_DIR") {
@@ -24,7 +25,11 @@ pub fn config_dir() -> io::Result<PathBuf> {
 pub fn init_config() -> io::Result<()> {
     let dir = config_dir()?;
     fs::create_dir_all(&dir)?;
-    match OpenOptions::new().write(true).create_new(true).open(dir.join("init.lua")) {
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dir.join("init.lua"))
+    {
         Ok(mut file) => file.write_all(DEFAULT_CONFIG.as_bytes())?,
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e),
@@ -44,10 +49,13 @@ pub fn install() -> io::Result<()> {
     #[cfg(not(windows))]
     let prefix = if let Some(prefix) = explicit {
         prefix
-    } else if env::var_os("SUDO_USER").is_some() || env::var_os("USER").as_deref() == Some(std::ffi::OsStr::new("root")) {
+    } else if env::var_os("SUDO_USER").is_some()
+        || env::var_os("USER").as_deref() == Some(std::ffi::OsStr::new("root"))
+    {
         PathBuf::from("/usr/local")
     } else {
-        PathBuf::from(env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is missing."))?).join(".local")
+        PathBuf::from(env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is missing."))?)
+            .join(".local")
     };
     let bin = prefix.join("bin");
     fs::create_dir_all(&bin)?;
@@ -78,14 +86,17 @@ pub fn install() -> io::Result<()> {
     };
     #[cfg(unix)]
     if let Some(user) = env::var_os("SUDO_USER") {
-        let status = Command::new("sudo")
-            .args(["-H", "-u"])
-            .arg(user)
-            .arg("--")
-            .arg(&target)
-            .arg("--init-config")
-            .env("FVIM_INSTALL_BIN", &bin)
-            .status()?;
+        let mut command = Command::new("sudo");
+        command.args(["-H", "-u"]).arg(user).args(["--", "env"]);
+        command.arg(format!("FVIM_INSTALL_BIN={}", bin.display()));
+        for name in ["FVIM_CONFIG_DIR", "FVIM_NO_PATH", "XDG_CONFIG_HOME"] {
+            if let Some(value) = env::var_os(name) {
+                let mut assignment = std::ffi::OsString::from(format!("{name}="));
+                assignment.push(value);
+                command.arg(assignment);
+            }
+        }
+        let status = command.arg(&target).arg("--init-config").status()?;
         if !status.success() {
             return Err(io::Error::other("User configuration setup failed."));
         }
@@ -105,7 +116,10 @@ pub fn install() -> io::Result<()> {
 #[cfg(windows)]
 fn persist_path(bin: &Path) -> io::Result<()> {
     let status = Command::new("powershell.exe")
-        .args(["-NoProfile", "-Command", r#"
+        .args([
+            "-NoProfile",
+            "-Command",
+            r#"
 $ErrorActionPreference = 'Stop'
 $bin = $env:FVIM_INSTALL_BIN
 $path = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -113,7 +127,8 @@ $parts = @($path -split ';' | Where-Object { $_ })
 if (-not ($parts | Where-Object { $_.TrimEnd('\') -ieq $bin.TrimEnd('\') })) {
     [Environment]::SetEnvironmentVariable('Path', (($parts + $bin) -join ';'), 'User')
 }
-"#])
+"#,
+        ])
         .env("FVIM_INSTALL_BIN", bin)
         .status()?;
     if status.success() {
@@ -128,7 +143,8 @@ fn persist_path(bin: &Path) -> io::Result<()> {
     if env::split_paths(&env::var_os("PATH").unwrap_or_default()).any(|p| p == bin) {
         return Ok(());
     }
-    let home = PathBuf::from(env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is missing."))?);
+    let home =
+        PathBuf::from(env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is missing."))?);
     let quoted = bin.to_string_lossy().replace('\'', "'\\''");
     let entry = format!("\n# fvim PATH\nexport PATH='{quoted}':\"$PATH\"\n");
     for name in [".profile", ".bashrc", ".zshrc"] {
@@ -139,7 +155,11 @@ fn persist_path(bin: &Path) -> io::Result<()> {
             Err(e) => return Err(e),
         };
         if !existing.contains(&entry) {
-            OpenOptions::new().create(true).append(true).open(path)?.write_all(entry.as_bytes())?;
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?
+                .write_all(entry.as_bytes())?;
         }
     }
     let fish_root = env::var_os("XDG_CONFIG_HOME")
@@ -148,7 +168,13 @@ fn persist_path(bin: &Path) -> io::Result<()> {
     let fish = fish_root.join("fish/conf.d");
     fs::create_dir_all(&fish)?;
     // fish single-quoted strings escape backslashes and quotes directly.
-    let quoted = bin.to_string_lossy().replace('\\', "\\\\").replace('\'', "\\'");
-    fs::write(fish.join("fvim-path.fish"), format!("fish_add_path '{quoted}'\n"))?;
+    let quoted = bin
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'");
+    fs::write(
+        fish.join("fvim-path.fish"),
+        format!("fish_add_path '{quoted}'\n"),
+    )?;
     Ok(())
 }

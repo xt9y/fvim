@@ -136,7 +136,10 @@ impl Buffer {
 
     pub fn save(&mut self) -> io::Result<()> {
         let path = self.path.as_ref().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "Open a filename before saving.")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Open a filename before saving.",
+            )
         })?;
         let text = self.text();
         write_atomic(path, text.as_bytes())?;
@@ -146,15 +149,24 @@ impl Buffer {
 }
 
 pub fn write_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let name = path.file_name().ok_or_else(|| io::Error::other("Missing filename."))?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::other("Missing filename."))?;
     for attempt in 0..100 {
         let temporary = parent.join(format!(
             ".{}.fvim-{}-{attempt}",
             name.to_string_lossy(),
             std::process::id()
         ));
-        let mut file = match OpenOptions::new().write(true).create_new(true).open(&temporary) {
+        let mut file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
@@ -173,7 +185,10 @@ pub fn write_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
         }
         return result;
     }
-    Err(io::Error::new(io::ErrorKind::AlreadyExists, "Temporary file collision."))
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "Temporary file collision.",
+    ))
 }
 
 #[cfg(test)]

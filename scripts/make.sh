@@ -31,12 +31,5 @@ fi
 case "${1:-build}" in
     build) cargo build --release --locked ;;
     test) cargo test --locked ;;
-    install)
-        [ -x target/release/fvim ] || {
-            echo "Run make before make install." >&2
-            exit 1
-        }
-        target/release/fvim --install
-        ;;
     *) echo "Unknown make target." >&2; exit 1 ;;
 esac

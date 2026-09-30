@@ -20,3 +20,5 @@ Run `fvim [file]`. Type to insert, use arrows/Home/End to move, Enter/Backspace/
 `make test` runs behavioral tests. `make clean` removes build output. Installation paths can be staged with `FVIM_PREFIX` and `FVIM_CONFIG_DIR`; `FVIM_NO_PATH=1` disables PATH changes for packaging/tests.
 
 There is exactly one workflow: `TEST`. It builds, tests and verifies repeatable installation on standard GitHub runner images, including x64/ARM64 and preview images. Hosted CI cannot validate every physical terminal; terminal cleanup and rendering are tested independently of a screen.
+
+Development order: basic frontend/backend; essential Vim motions/search/substitution; measured optimization; Neovim built-in features; settings; themes; plugin support much later. Rust owns the frontend and backend; Lua is the eventual scripting interface.
