@@ -88,12 +88,26 @@ def sudo_install_test(root):
             run("sudo", "-n", "chown", "-R", f"{os.getuid()}:{os.getgid()}", str(prefix))
 
 
+def expect_file(path, expected):
+    deadline = time.monotonic() + 20
+    actual = None
+    while time.monotonic() < deadline:
+        try:
+            actual = path.read_bytes()
+        except OSError:
+            pass
+        if actual == expected:
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"Save did not produce {expected!r}; last file contents: {actual!r}")
+
+
 def exercise_editor(send, expect, clear, path):
     expect(b"NORMAL")
     clear()
     send(b"ihello\rworld\x13")
     expect(b"Saved.")
-    assert path.read_bytes() == b"hello\nworld"
+    expect_file(path, b"hello\nworld")
     clear()
     send(b"\x1b")
     expect(b"NORMAL")
@@ -112,23 +126,23 @@ def exercise_editor(send, expect, clear, path):
     clear()
     send(b":w\r")
     expect(b"Saved.")
-    assert path.read_bytes() == b"HELLO\nEARTH"
+    expect_file(path, b"HELLO\nEARTH")
     clear()
     send(b"u:w\r")
     expect(b"Saved.")
-    assert path.read_bytes() == b"HELLO\nworld"
+    expect_file(path, b"HELLO\nworld")
     clear()
     send(b"\x12:w\r")  # Ctrl-R redo.
     expect(b"Saved.")
-    assert path.read_bytes() == b"HELLO\nEARTH"
+    expect_file(path, b"HELLO\nEARTH")
     clear()
     send(b"0vld:w\r")
     expect(b"Saved.")
-    assert path.read_bytes() == b"HELLO\nRTH"
+    expect_file(path, b"HELLO\nRTH")
     clear()
     send(b"u:w\r")
     expect(b"Saved.")
-    assert path.read_bytes() == b"HELLO\nEARTH"
+    expect_file(path, b"HELLO\nEARTH")
     clear()
     send(b"iX\x11")
     expect(b"Unsaved changes.")
