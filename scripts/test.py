@@ -7,8 +7,8 @@ import tempfile
 import time
 
 
-def run(*args, env=None):
-    return subprocess.check_output(args, env=env, text=True, timeout=120).strip()
+def run(*args, env=None, cwd=None):
+    return subprocess.check_output(args, env=env, cwd=cwd, text=True, timeout=120).strip()
 
 
 def install_test(root):
@@ -82,10 +82,108 @@ def sudo_install_test(root):
         assert init.is_file()
         assert init.stat().st_uid == os.getuid(), "Sudo installation must create user-owned config."
         assert run(str(prefix / "bin/fvim"), "--version") == "fvim 0.2.0"
-        print("Sudo install and invoking-user configuration ownership passed.")
+        run("sudo", "-n", "chmod", "700", str(prefix / "bin"))
+        # Exercise permission escalation only inside this test's staging prefix.
+        cleanup = root / "sudo clean workspace"
+        (cleanup / "scripts").mkdir(parents=True)
+        for name in ("Makefile", "scripts/make.sh"):
+            shutil.copyfile(name, cleanup / name)
+        run("make", "clean", f"FVIM_PREFIX={prefix}", cwd=cleanup)
+        run("sudo", "-n", "test", "!", "-e", str(prefix / "bin/fvim"))
+        assert init.is_file() and init.stat().st_uid == os.getuid()
+        print("Sudo install, protected-binary cleanup and user config ownership passed.")
     finally:
         if prefix.exists():
             run("sudo", "-n", "chown", "-R", f"{os.getuid()}:{os.getgid()}", str(prefix))
+
+
+def clean_test(root):
+    import shutil
+    sandbox = root / "clean workspace"
+    (sandbox / "scripts").mkdir(parents=True)
+    for name in ("Makefile", "scripts/make.sh", "scripts/make.ps1"):
+        shutil.copyfile(name, sandbox / name)
+    prefix = sandbox / "prefix with spaces"
+    home = sandbox / "home"
+    appdata = sandbox / "local appdata"
+    binary_name = "fvim.exe" if os.name == "nt" else "fvim"
+    binary = prefix / "bin" / binary_name
+    binary.parent.mkdir(parents=True)
+    binary.write_text("old executable")
+    config = prefix / "init.lua"
+    config.write_text("-- preserve config\n")
+    unrelated = binary.parent / "other-editor"
+    unrelated.write_text("keep")
+    (sandbox / "target/release").mkdir(parents=True)
+    (sandbox / "target/release" / binary_name).write_text("old build")
+    env = dict(os.environ, HOME=str(home), USERPROFILE=str(home), LOCALAPPDATA=str(appdata),
+               FVIM_PREFIX=str(prefix), FVIM_CONFIG_DIR=str(prefix))
+    env.pop("SUDO_USER", None)
+    outside = home / ".local/bin" / binary_name
+    outside.parent.mkdir(parents=True)
+    outside.write_text("outside prefix")
+    env["PATH"] = os.pathsep.join([str(outside.parent), os.environ["PATH"]])
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                     wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        kernel.CreateFileW.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        # Allow reads/writes but deny deletion while this handle is open.
+        handle = kernel.CreateFileW(str(binary), 0x80000000, 3, None, 3, 0x80, None)
+        assert handle != wintypes.HANDLE(-1).value, ctypes.get_last_error()
+        try:
+            result = subprocess.run(["make", "clean"], env=env, cwd=sandbox,
+                                    capture_output=True, text=True, timeout=120)
+            assert result.returncode != 0, "Locked installed binaries must fail cleanup."
+            assert "Cannot remove" in result.stdout + result.stderr
+            assert binary.is_file() and config.is_file()
+        finally:
+            kernel.CloseHandle(handle)
+    run("make", "clean", env=env, cwd=sandbox)
+    assert not binary.exists(), "make clean must remove the installed executable."
+    assert not (sandbox / "target").exists()
+    assert config.read_text() == "-- preserve config\n"
+    assert unrelated.read_text() == "keep"
+    assert outside.read_text() == "outside prefix", "Explicit prefix cleanup must stay confined."
+    run("make", "clean", env=env, cwd=sandbox)
+
+    # Never let a developer's real installations become default-clean test data.
+    paths = [Path((p.strip('"') if os.name == "nt" else p) or ".") / binary_name
+             for p in os.environ.get("PATH", "").split(os.pathsep)]
+    if os.name != "nt":
+        paths.extend(Path(p) for p in ("/usr/local/bin/fvim", "/opt/homebrew/bin/fvim"))
+    if any(p.is_file() or p.is_symlink() for p in paths):
+        print("Default clean test skipped: existing installation outside the sandbox.")
+        return
+    copies = [home / ".local/bin" / binary_name, home / "bin" / binary_name,
+              appdata / "fvim/bin" / binary_name] if os.name == "nt" else [
+                  home / ".local/bin/fvim", home / "bin/fvim"]
+    for n in (1, 2):
+        copies.append(sandbox / f"PATH copy {n}" / binary_name)
+    for path in copies:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("stale executable")
+    reference = sandbox / "reference executable"
+    if os.name != "nt":
+        reference.write_text("keep symlink target")
+        copies[0].unlink()
+        copies[0].symlink_to(reference)
+    env.pop("FVIM_PREFIX")
+    env.pop("FVIM_CONFIG_DIR")
+    env["PATH"] = os.pathsep.join([str(p.parent) for p in copies] + [os.environ["PATH"]])
+    keep_config = appdata / "fvim/init.lua" if os.name == "nt" else home / ".config/fvim/init.lua"
+    keep_config.parent.mkdir(parents=True, exist_ok=True)
+    keep_config.write_text("-- user config\n")
+    run("make", "clean", env=env, cwd=sandbox)
+    assert all(not p.exists() and not p.is_symlink() for p in copies)
+    assert keep_config.read_text() == "-- user config\n"
+    if reference.exists():
+        assert reference.read_text() == "keep symlink target"
+    run("make", "clean", env=env, cwd=sandbox)
+    print("Clean: installed/PATH duplicates and build output removed; config and other files preserved.")
 
 
 def expect_file(path, expected):
@@ -361,4 +459,5 @@ with tempfile.TemporaryDirectory(prefix="fvim-ci-") as directory:
     executable = install_test(root)
     terminal_test(executable, root)
     sudo_install_test(root)
+    clean_test(root)
 print("Install, PATH and configuration tests passed.")

@@ -32,7 +32,7 @@ Patterns use a **subset of Vim's default magic syntax**: `. * ^ $`, character cl
 
 Visual selections support deletion, change, yank, paste and indentation; Normal-only commands end the selection before running. Writing a named buffer to another file with `:w file` writes a copy and keeps unsaved changes to the original protected.
 
-`make test` runs behavioral tests. `make clean` removes build output. Installation paths can be staged with `FVIM_PREFIX` and `FVIM_CONFIG_DIR`; `FVIM_NO_PATH=1` disables PATH changes for packaging/tests.
+`make test` runs behavioral tests. `make clean` removes build output and installed executables named `fvim` from the standard install locations and every current PATH directory, preserving configuration and other files. Unix cleanup requests sudo when an old system copy is protected; Windows cleanup fails clearly if an executable is locked or needs elevated permissions. With `FVIM_PREFIX` set, installed-binary cleanup is confined to that prefix. Installation paths can be staged with `FVIM_PREFIX` and `FVIM_CONFIG_DIR`; `FVIM_NO_PATH=1` disables PATH changes for packaging/tests.
 
 There is exactly one workflow: `TEST`. It builds, tests and verifies repeatable installation, PATH/configuration and real terminal sessions on the standard GitHub runner matrix, including x64/ARM64 and preview images. Windows uses ConPTY; Linux/macOS use PTYs. Hosted CI cannot validate every physical terminal.
 
