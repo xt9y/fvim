@@ -39,7 +39,7 @@ def install_test(root):
         if registry:
             path, _ = winreg.QueryValueEx(registry, "Path")
             parts = [p.rstrip("\\").casefold() for p in path.split(";")]
-            assert parts.count(str(binary.parent).rstrip("\\").casefold()) == 1, f"Expected {binary.parent}; fvim entries: {[p for p in parts if 'fvim' in p]}"
+            assert parts.count(str(binary.parent.resolve()).rstrip("\\").casefold()) == 1, f"Expected {binary.parent}; fvim entries: {[p for p in parts if 'fvim' in p]}"
             fresh = dict(env, PATH=path + ";" + os.environ["PATH"])
             assert run("fvim", "--version", env=fresh) == "fvim 0.1.0"
         else:
@@ -47,6 +47,7 @@ def install_test(root):
             for name in (".profile", ".bashrc", ".zshrc"):
                 assert (home / name).read_text().count("# fvim PATH") == 1
             assert (home / ".config/fish/conf.d/fvim-path.fish").is_file()
+        print(f"Installed executable: {binary.stat().st_size} bytes")
         return binary
     finally:
         if registry:
@@ -73,13 +74,17 @@ def sudo_install_test(root):
     root.chmod(0o755)
     prefix = root / "sudo-prefix"
     config = root / "sudo-config"
-    run("sudo", "-n", "make", "install",
-        f"FVIM_PREFIX={prefix}", f"FVIM_CONFIG_DIR={config}", "FVIM_NO_PATH=1")
-    init = config / "init.lua"
-    assert init.is_file()
-    assert init.stat().st_uid == os.getuid(), "Sudo installation must create user-owned config."
-    assert run(str(prefix / "bin/fvim"), "--version") == "fvim 0.1.0"
-    print("Sudo install and invoking-user configuration ownership passed.")
+    try:
+        run("sudo", "-n", "make", "install",
+            f"FVIM_PREFIX={prefix}", f"FVIM_CONFIG_DIR={config}", "FVIM_NO_PATH=1")
+        init = config / "init.lua"
+        assert init.is_file()
+        assert init.stat().st_uid == os.getuid(), "Sudo installation must create user-owned config."
+        assert run(str(prefix / "bin/fvim"), "--version") == "fvim 0.1.0"
+        print("Sudo install and invoking-user configuration ownership passed.")
+    finally:
+        if prefix.exists():
+            run("sudo", "-n", "chown", "-R", f"{os.getuid()}:{os.getgid()}", str(prefix))
 
 
 def windows_terminal_test(binary, root):
@@ -236,11 +241,15 @@ def terminal_test(binary, root):
     import termios
 
     path = root / "edited.txt"
-    pid, master = pty.fork()
-    if pid == 0:
-        os.environ["TERM"] = "xterm-256color"
-        os.execv(str(binary), [str(binary), str(path)])
-    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    def controlling_terminal():
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+    process = subprocess.Popen([str(binary), str(path)], stdin=slave, stdout=slave, stderr=slave,
+                               env=dict(os.environ, TERM="xterm-256color"),
+                               start_new_session=True, preexec_fn=controlling_terminal)
+    os.close(slave)
+    pid = process.pid
     transcript = bytearray()
 
     def expect(text):

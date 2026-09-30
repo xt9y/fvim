@@ -71,15 +71,10 @@ jobs:
           python scripts/test.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Format source for initial bootstrap
-        if: always() && matrix.os == 'ubuntu-24.04'
+      - name: Rust formatting
+        if: matrix.os == 'ubuntu-24.04'
         shell: bash
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           rustup component add rustfmt
-          cargo fmt
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-          print("FVIM_FORMAT=" + json.dumps({str(p): p.read_text() for pattern in ("src/*.rs", "tests/*.rs") for p in Path(".").glob(pattern)}))
-          PY
+          cargo fmt --check

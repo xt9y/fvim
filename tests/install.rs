@@ -85,12 +85,19 @@ fn config_location_and_noninteractive_failure() {
 fn default_platform_config_location_is_created() {
     let sandbox = Sandbox::new();
     let mut command = Command::new(env!("CARGO_BIN_EXE_fvim"));
-    command.arg("--init-config").env_remove("FVIM_CONFIG_DIR").env("FVIM_NO_PATH", "1");
+    command
+        .arg("--init-config")
+        .env_remove("FVIM_CONFIG_DIR")
+        .env("FVIM_NO_PATH", "1");
     #[cfg(windows)]
     command.env("LOCALAPPDATA", &sandbox.0);
     #[cfg(not(windows))]
     command.env("XDG_CONFIG_HOME", &sandbox.0);
     let output = command.output().unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(sandbox.0.join("fvim/init.lua").is_file());
 }
