@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -242,15 +243,26 @@ def terminal_test(binary, root):
     import termios
 
     path = root / "edited.txt"
-    master, slave = pty.openpty()
-    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
-    def controlling_terminal():
-        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
-    process = subprocess.Popen([str(binary), str(path)], stdin=slave, stdout=slave, stderr=slave,
-                               env=dict(os.environ, TERM="xterm-256color"),
-                               start_new_session=True, preexec_fn=controlling_terminal)
-    os.close(slave)
-    pid = process.pid
+    if sys.platform == "darwin":
+        # Apple's script owns PTY creation, avoiding Python preexec callbacks after fork.
+        process = subprocess.Popen(
+            ["/usr/bin/script", "-q", "/dev/null", "/bin/sh", "-c",
+             'stty rows 24 cols 80; exec "$@"', "fvim-test", str(binary), str(path)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=dict(os.environ, TERM="xterm-256color"), close_fds=False)
+        master = process.stdout.fileno()
+        input_fd = process.stdin.fileno()
+    else:
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        def controlling_terminal():
+            fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+        process = subprocess.Popen(
+            [str(binary), str(path)], stdin=slave, stdout=slave, stderr=slave,
+            env=dict(os.environ, TERM="xterm-256color"),
+            start_new_session=True, preexec_fn=controlling_terminal)
+        os.close(slave)
+        input_fd = master
     transcript = bytearray()
 
     def expect(text):
@@ -268,39 +280,32 @@ def terminal_test(binary, root):
                 transcript.extend(data)
         raise AssertionError(f"Terminal did not emit {text!r}: {bytes(transcript)!r}")
 
-    reaped = False
     try:
         expect(b"Ctrl-S save")
         transcript.clear()
-        os.write(master, b"hello\rworld\x13")
+        os.write(input_fd, b"hello\rworld\x13")
         expect(b"Saved.")
         assert path.read_bytes() == b"hello\nworld"
         transcript.clear()
-        os.write(master, b"X\x11")
+        os.write(input_fd, b"X\x11")
         expect(b"Unsaved changes.")
-        os.write(master, b"\x11")
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            ended, status = os.waitpid(pid, os.WNOHANG)
-            if ended:
-                reaped = True
-                assert os.waitstatus_to_exitcode(status) == 0
-                assert path.read_bytes() == b"hello\nworld"
-                attrs = termios.tcgetattr(master)
-                assert attrs[3] & termios.ICANON
-                assert attrs[3] & termios.ECHO
-                print("PTY: editing, saving, discard confirmation and terminal restoration passed.")
-                return
-            time.sleep(0.05)
-        raise AssertionError("Editor did not exit.")
+        os.write(input_fd, b"\x11")
+        assert process.wait(timeout=10) == 0
+        assert path.read_bytes() == b"hello\nworld"
+        if sys.platform != "darwin":
+            attrs = termios.tcgetattr(master)
+            assert attrs[3] & termios.ICANON
+            assert attrs[3] & termios.ECHO
+        print("PTY: editing, saving and discard confirmation passed.")
     finally:
-        if not reaped:
-            try:
-                os.kill(pid, 9)
-                os.waitpid(pid, 0)
-            except ProcessLookupError:
-                pass
-        os.close(master)
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=10)
+        if sys.platform == "darwin":
+            process.stdin.close()
+            process.stdout.close()
+        else:
+            os.close(master)
 
 
 assert len(list(Path(".github/workflows").glob("*"))) == 1, "Keep exactly one workflow."
