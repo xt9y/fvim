@@ -7,7 +7,7 @@ import time
 
 
 def run(*args, env=None):
-    return subprocess.check_output(args, env=env, text=True).strip()
+    return subprocess.check_output(args, env=env, text=True, timeout=120).strip()
 
 
 def install_test(root):
@@ -162,6 +162,7 @@ def windows_terminal_test(binary, root):
                                          c.sizeof(handle), None, None))
         startup = StartupEx()
         startup.StartupInfo.cb = c.sizeof(startup)
+        startup.StartupInfo.dwFlags = 0x00000100  # STARTF_USESTDHANDLES; NULL handles use ConPTY.
         startup.lpAttributeList = c.cast(attributes, pointer)
         command = c.create_unicode_buffer(subprocess.list2cmdline([str(binary), str(path)]))
         check(k.CreateProcessW(str(binary), command, None, None, False, 0x00080000,

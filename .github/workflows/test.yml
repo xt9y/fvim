@@ -5,6 +5,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  PYTHONUNBUFFERED: '1'
+
 permissions:
   contents: read
 
@@ -52,22 +55,39 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "C:\ProgramData\chocolatey\bin" >> $env:GITHUB_PATH
 
-      - name: Build and test on Unix
+      - name: Build on Unix
         if: runner.os != 'Windows'
         shell: bash
-        run: |
-          make
-          make test
-          python3 scripts/test.py
+        run: make
 
-      - name: Build and test on Windows
+      - name: Unit tests on Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: make test
+
+      - name: Installation and terminal tests on Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: python3 scripts/test.py
+
+      - name: Build on Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           make
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Unit tests on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
           make test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Installation and terminal tests on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
           python scripts/test.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
