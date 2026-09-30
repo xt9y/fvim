@@ -65,6 +65,17 @@ pub fn install() -> io::Result<()> {
         return Err(error);
     }
     let bin = fs::canonicalize(bin)?;
+    #[cfg(windows)]
+    let bin = {
+        let text = bin.to_string_lossy();
+        if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+            PathBuf::from(format!(r"\\{unc}"))
+        } else if let Some(local) = text.strip_prefix(r"\\?\") {
+            PathBuf::from(local)
+        } else {
+            bin
+        }
+    };
     #[cfg(unix)]
     if let Some(user) = env::var_os("SUDO_USER") {
         let status = Command::new("sudo")

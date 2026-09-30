@@ -4,6 +4,11 @@ if ($Target -eq 'clean') {
     if (Test-Path target) { Remove-Item target -Recurse -Force }
     exit 0
 }
+if ($Target -eq 'install') {
+    if (-not (Test-Path target/release/fvim.exe)) { throw 'Run make before make install.' }
+    & ./target/release/fvim.exe --install
+    exit $LASTEXITCODE
+}
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     $CargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
     $CargoBin = Join-Path $CargoHome 'bin'
@@ -19,8 +24,8 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     $env:PATH = "$CargoBin;$env:PATH"
 }
 switch ($Target) {
-    'build' { & cargo build --release }
-    'test' { & cargo test }
+    'build' { & cargo build --release --locked }
+    'test' { & cargo test --locked }
     'install' {
         if (-not (Test-Path target/release/fvim.exe)) { throw 'Run make before make install.' }
         & ./target/release/fvim.exe --install

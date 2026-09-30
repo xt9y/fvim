@@ -18,7 +18,7 @@ def install_test(root):
     home.mkdir()
     prefix = root / "prefix with spaces"
     config = root / "configuration"
-    env.update(HOME=str(home), FVIM_PREFIX=str(prefix), FVIM_CONFIG_DIR=str(config))
+    env.update(HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"), FVIM_PREFIX=str(prefix), FVIM_CONFIG_DIR=str(config))
     registry = None
     if os.name == "nt":
         import winreg
@@ -43,7 +43,7 @@ def install_test(root):
             fresh = dict(env, PATH=path + ";" + os.environ["PATH"])
             assert run("fvim", "--version", env=fresh) == "fvim 0.1.0"
         else:
-            assert run("sh", "-c", '. "$HOME/.profile"; command -v fvim', env=env) == str(binary)
+            assert Path(run("sh", "-c", '. "$HOME/.profile"; command -v fvim', env=env)).resolve() == binary.resolve()
             for name in (".profile", ".bashrc", ".zshrc"):
                 assert (home / name).read_text().count("# fvim PATH") == 1
             assert (home / ".config/fish/conf.d/fvim-path.fish").is_file()
@@ -60,9 +60,153 @@ def install_test(root):
             registry.Close()
 
 
+
+def windows_terminal_test(binary, root):
+    # Native ConPTY; no pip packages or terminal emulator required.
+    import ctypes as c
+    from ctypes import wintypes as w
+    import threading
+
+    k = c.WinDLL("kernel32", use_last_error=True)
+    handle = w.HANDLE
+    pointer = c.c_void_p
+    size_t = c.c_size_t
+
+    class Coord(c.Structure):
+        _fields_ = [("X", w.SHORT), ("Y", w.SHORT)]
+
+    class Startup(c.Structure):
+        _fields_ = [
+            ("cb", w.DWORD), ("lpReserved", w.LPWSTR), ("lpDesktop", w.LPWSTR),
+            ("lpTitle", w.LPWSTR), ("dwX", w.DWORD), ("dwY", w.DWORD),
+            ("dwXSize", w.DWORD), ("dwYSize", w.DWORD), ("dwXCountChars", w.DWORD),
+            ("dwYCountChars", w.DWORD), ("dwFillAttribute", w.DWORD), ("dwFlags", w.DWORD),
+            ("wShowWindow", w.WORD), ("cbReserved2", w.WORD), ("lpReserved2", pointer),
+            ("hStdInput", handle), ("hStdOutput", handle), ("hStdError", handle),
+        ]
+
+    class StartupEx(c.Structure):
+        _fields_ = [("StartupInfo", Startup), ("lpAttributeList", pointer)]
+
+    class Process(c.Structure):
+        _fields_ = [("hProcess", handle), ("hThread", handle),
+                    ("dwProcessId", w.DWORD), ("dwThreadId", w.DWORD)]
+
+    signatures = {
+        "CreatePipe": ([c.POINTER(handle), c.POINTER(handle), pointer, w.DWORD], w.BOOL),
+        "CreatePseudoConsole": ([Coord, handle, handle, w.DWORD, c.POINTER(handle)], c.c_long),
+        "InitializeProcThreadAttributeList": ([pointer, w.DWORD, w.DWORD, c.POINTER(size_t)], w.BOOL),
+        "UpdateProcThreadAttribute": ([pointer, w.DWORD, size_t, pointer, size_t, pointer, pointer], w.BOOL),
+        "CreateProcessW": ([w.LPCWSTR, w.LPWSTR, pointer, pointer, w.BOOL, w.DWORD,
+                            pointer, w.LPCWSTR, pointer, c.POINTER(Process)], w.BOOL),
+        "ReadFile": ([handle, pointer, w.DWORD, c.POINTER(w.DWORD), pointer], w.BOOL),
+        "WriteFile": ([handle, pointer, w.DWORD, c.POINTER(w.DWORD), pointer], w.BOOL),
+        "WaitForSingleObject": ([handle, w.DWORD], w.DWORD),
+        "GetExitCodeProcess": ([handle, c.POINTER(w.DWORD)], w.BOOL),
+        "TerminateProcess": ([handle, w.UINT], w.BOOL),
+        "CloseHandle": ([handle], w.BOOL),
+        "ClosePseudoConsole": ([handle], None),
+        "DeleteProcThreadAttributeList": ([pointer], None),
+    }
+    for name, (args, result) in signatures.items():
+        fn = getattr(k, name)
+        fn.argtypes, fn.restype = args, result
+
+    def check(ok):
+        if not ok:
+            raise c.WinError(c.get_last_error())
+
+    input_read, input_write, output_read, output_write, console = [handle() for _ in range(5)]
+    process = Process()
+    attributes = None
+    thread = None
+    transcript = bytearray()
+    condition = threading.Condition()
+    path = root / "edited.txt"
+    try:
+        check(k.CreatePipe(c.byref(input_read), c.byref(input_write), None, 0))
+        check(k.CreatePipe(c.byref(output_read), c.byref(output_write), None, 0))
+        result = k.CreatePseudoConsole(Coord(100, 24), input_read, output_write, 0, c.byref(console))
+        assert result == 0, f"CreatePseudoConsole failed: {result:#x}"
+        needed = size_t()
+        k.InitializeProcThreadAttributeList(None, 1, 0, c.byref(needed))
+        attributes = c.create_string_buffer(needed.value)
+        check(k.InitializeProcThreadAttributeList(attributes, 1, 0, c.byref(needed)))
+        check(k.UpdateProcThreadAttribute(attributes, 0, 0x00020016, console,
+                                         c.sizeof(handle), None, None))
+        startup = StartupEx()
+        startup.StartupInfo.cb = c.sizeof(startup)
+        startup.lpAttributeList = c.cast(attributes, pointer)
+        command = c.create_unicode_buffer(subprocess.list2cmdline([str(binary), str(path)]))
+        check(k.CreateProcessW(str(binary), command, None, None, False, 0x00080000,
+                               None, None, c.byref(startup), c.byref(process)))
+        k.CloseHandle(input_read)
+        input_read = handle()
+        k.CloseHandle(output_write)
+        output_write = handle()
+
+        def drain():
+            data = c.create_string_buffer(65536)
+            count = w.DWORD()
+            while k.ReadFile(output_read, data, len(data), c.byref(count), None) and count.value:
+                with condition:
+                    transcript.extend(data.raw[:count.value])
+                    condition.notify_all()
+
+        thread = threading.Thread(target=drain, daemon=True)
+        thread.start()
+
+        def expect(text):
+            deadline = time.monotonic() + 20
+            with condition:
+                while text not in transcript:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise AssertionError(f"ConPTY did not emit {text!r}: {bytes(transcript)!r}")
+                    condition.wait(min(remaining, 0.2))
+
+        def send(data):
+            count = w.DWORD()
+            check(k.WriteFile(input_write, data, len(data), c.byref(count), None))
+            assert count.value == len(data)
+
+        expect(b"Ctrl-S save")
+        with condition:
+            transcript.clear()
+        send(b"hello\rworld\x13")
+        expect(b"Saved.")
+        assert path.read_bytes() == b"hello\nworld"
+        with condition:
+            transcript.clear()
+        send(b"X\x11")
+        expect(b"Unsaved changes.")
+        send(b"\x11")
+        assert k.WaitForSingleObject(process.hProcess, 10000) == 0, "Editor did not exit."
+        exit_code = w.DWORD()
+        check(k.GetExitCodeProcess(process.hProcess, c.byref(exit_code)))
+        assert exit_code.value == 0
+        assert path.read_bytes() == b"hello\nworld"
+        print("ConPTY: editing, saving and discard confirmation passed.")
+    finally:
+        if process.hProcess:
+            if k.WaitForSingleObject(process.hProcess, 0) != 0:
+                k.TerminateProcess(process.hProcess, 1)
+                k.WaitForSingleObject(process.hProcess, 10000)
+        if console:
+            k.ClosePseudoConsole(console)
+        if thread:
+            thread.join(timeout=5)
+        if attributes:
+            k.DeleteProcThreadAttributeList(attributes)
+        for value in (input_read, input_write, output_read, output_write,
+                      process.hThread, process.hProcess):
+            if value:
+                k.CloseHandle(value)
+
+
 def terminal_test(binary, root):
     if os.name == "nt":
-        print("Windows: native build/install and rendering tests; interactive ConPTY coverage pending.")
+        windows_terminal_test(binary, root)
         return
     import fcntl
     import pty

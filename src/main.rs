@@ -105,7 +105,7 @@ fn render(buffer: &Buffer, top: &mut usize, left: &mut usize, message: &str) -> 
             queue!(out, Print("~"))?;
         }
     }
-    let name = buffer.path.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "[No Name]".to_owned());
+    let name = buffer.path.as_ref().and_then(|p| p.file_name()).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "[No Name]".to_owned());
     let status = format!(" {}{} | {}:{} | Ctrl-S save  Ctrl-Q quit  Ctrl-Z undo",
         name, if buffer.dirty() { " [+]" } else { "" }, buffer.row + 1, buffer.col + 1);
     queue!(out, MoveTo(0, height - 2), SetAttribute(Attribute::Reverse),
