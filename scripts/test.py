@@ -41,7 +41,7 @@ def install_test(root):
             parts = [p.rstrip("\\").casefold() for p in path.split(";")]
             assert parts.count(str(binary.parent.resolve()).rstrip("\\").casefold()) == 1, f"Expected {binary.parent}; fvim entries: {[p for p in parts if 'fvim' in p]}"
             fresh = dict(env, PATH=path + ";" + os.environ["PATH"])
-            assert run("fvim", "--version", env=fresh) == "fvim 0.1.0"
+            assert run("cmd.exe", "/d", "/c", "fvim --version", env=fresh) == "fvim 0.1.0"
         else:
             assert Path(run("sh", "-c", '. "$HOME/.profile"; command -v fvim', env=env)).resolve() == binary.resolve()
             for name in (".profile", ".bashrc", ".zshrc"):
