@@ -7,6 +7,7 @@ struct Snapshot {
     lines: Vec<String>,
     row: usize,
     col: usize,
+    eol: bool,
 }
 
 pub struct Buffer {
@@ -15,8 +16,11 @@ pub struct Buffer {
     pub col: usize,
     pub path: Option<PathBuf>,
     crlf: bool,
+    eol: bool,
     saved: String,
     undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
+    change: Option<Snapshot>,
 }
 
 impl Buffer {
@@ -34,95 +38,190 @@ impl Buffer {
         Ok(buffer)
     }
 
-    fn from_text(text: &str) -> Self {
+    pub fn from_text(text: &str) -> Self {
         let crlf = text.contains("\r\n");
         let normalized = text.replace("\r\n", "\n");
+        let eol = normalized.ends_with('\n');
+        let body = if eol {
+            &normalized[..normalized.len() - 1]
+        } else {
+            &normalized
+        };
         Self {
-            lines: normalized.split('\n').map(str::to_owned).collect(),
+            lines: body.split('\n').map(str::to_owned).collect(),
             row: 0,
             col: 0,
             path: None,
             crlf,
+            eol,
             saved: text.to_owned(),
             undo: Vec::new(),
+            redo: Vec::new(),
+            change: None,
         }
     }
 
+    // Motion/range offsets count Unicode scalar values, with one character per LF.
+    // The final file newline is metadata, not an additional editable row.
+    pub fn body(&self) -> String {
+        self.lines.join("\n")
+    }
+
     pub fn text(&self) -> String {
-        self.lines.join(if self.crlf { "\r\n" } else { "\n" })
+        let separator = if self.crlf { "\r\n" } else { "\n" };
+        let mut text = self.lines.join(separator);
+        if self.eol {
+            text.push_str(separator);
+        }
+        text
     }
 
     pub fn dirty(&self) -> bool {
         self.text() != self.saved
     }
 
-    fn checkpoint(&mut self) {
-        self.undo.push(Snapshot {
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
             lines: self.lines.clone(),
             row: self.row,
             col: self.col,
-        });
+            eol: self.eol,
+        }
     }
 
-    fn byte_col(&self) -> usize {
-        self.lines[self.row]
-            .char_indices()
-            .nth(self.col)
-            .map_or(self.lines[self.row].len(), |(byte, _)| byte)
+    fn restore(&mut self, snapshot: Snapshot) {
+        self.lines = snapshot.lines;
+        self.row = snapshot.row;
+        self.col = snapshot.col;
+        self.eol = snapshot.eol;
     }
 
-    pub fn insert(&mut self, text: &str) {
-        if text.is_empty() {
+    fn checkpoint(&mut self) {
+        if self.change.is_none() {
+            self.undo.push(self.snapshot());
+            self.redo.clear();
+        }
+    }
+
+    pub fn begin_change(&mut self) {
+        if self.change.is_none() {
+            self.change = Some(self.snapshot());
+        }
+    }
+
+    pub fn end_change(&mut self) -> bool {
+        let Some(snapshot) = self.change.take() else {
+            return false;
+        };
+        if self.lines != snapshot.lines || self.eol != snapshot.eol {
+            self.undo.push(snapshot);
+            self.redo.clear();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn offset_at(&self, row: usize, col: usize) -> usize {
+        self.lines
+            .iter()
+            .take(row)
+            .map(|l| l.chars().count() + 1)
+            .sum::<usize>()
+            + col.min(self.lines[row].chars().count())
+    }
+
+    pub fn offset(&self) -> usize {
+        self.offset_at(self.row, self.col)
+    }
+
+    pub fn set_offset(&mut self, mut offset: usize) {
+        for (row, line) in self.lines.iter().enumerate() {
+            let length = line.chars().count();
+            if offset <= length || row + 1 == self.lines.len() {
+                self.row = row;
+                self.col = offset.min(length);
+                return;
+            }
+            offset -= length + 1;
+        }
+    }
+
+    pub fn replace(&mut self, start: usize, end: usize, text: &str) {
+        let body = self.body();
+        let byte = |n| body.char_indices().nth(n).map_or(body.len(), |(i, _)| i);
+        let start = byte(start);
+        let end = byte(end).max(start);
+        let text = text.replace("\r\n", "\n");
+        if body[start..end] == text {
+            self.set_offset(body[..start].chars().count() + text.chars().count());
             return;
         }
         self.checkpoint();
-        let text = text.replace("\r\n", "\n");
-        let byte = self.byte_col();
-        let tail = self.lines[self.row].split_off(byte);
-        let mut parts = text.split('\n');
-        let first = parts.next().unwrap();
-        self.lines[self.row].push_str(first);
-        self.col += first.chars().count();
-        for part in parts {
-            self.row += 1;
-            self.lines.insert(self.row, part.to_owned());
-            self.col = part.chars().count();
+        let mut result = body[..start].to_owned();
+        result.push_str(&text);
+        result.push_str(&body[end..]);
+        self.lines = result.split('\n').map(str::to_owned).collect();
+        self.set_offset(body[..start].chars().count() + text.chars().count());
+    }
+
+    pub fn replace_lines(&mut self, start: usize, end: usize, lines: &[String]) {
+        self.checkpoint();
+        self.lines.splice(start..end, lines.iter().cloned());
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+            self.eol = false;
         }
-        self.lines[self.row].push_str(&tail);
+        self.row = start.min(self.lines.len() - 1);
+        self.col = 0;
+    }
+
+    pub fn put_lines(&mut self, start: usize, lines: &[String]) {
+        let empty = self.text().is_empty();
+        self.replace_lines(
+            if empty { 0 } else { start },
+            if empty { 1 } else { start },
+            lines,
+        );
+        if empty {
+            self.eol = true;
+        }
+    }
+
+    pub fn insert(&mut self, text: &str) {
+        if !text.is_empty() {
+            let pos = self.offset();
+            self.replace(pos, pos, text);
+        }
     }
 
     pub fn backspace(&mut self) {
-        if self.col > 0 {
-            self.checkpoint();
-            self.col -= 1;
-            let byte = self.byte_col();
-            self.lines[self.row].remove(byte);
-        } else if self.row > 0 {
-            self.checkpoint();
-            let line = self.lines.remove(self.row);
-            self.row -= 1;
-            self.col = self.lines[self.row].chars().count();
-            self.lines[self.row].push_str(&line);
+        let pos = self.offset();
+        if pos > 0 {
+            self.replace(pos - 1, pos, "");
         }
     }
 
     pub fn delete(&mut self) {
-        if self.col < self.lines[self.row].chars().count() {
-            self.checkpoint();
-            let byte = self.byte_col();
-            self.lines[self.row].remove(byte);
-        } else if self.row + 1 < self.lines.len() {
-            self.checkpoint();
-            let line = self.lines.remove(self.row + 1);
-            self.lines[self.row].push_str(&line);
+        let pos = self.offset();
+        if self.col < self.lines[self.row].chars().count() || self.row + 1 < self.lines.len() {
+            self.replace(pos, pos + 1, "");
         }
     }
 
     pub fn undo(&mut self) {
+        self.end_change();
         if let Some(snapshot) = self.undo.pop() {
-            self.lines = snapshot.lines;
-            self.row = snapshot.row;
-            self.col = snapshot.col;
+            self.redo.push(self.snapshot());
+            self.restore(snapshot);
+        }
+    }
+
+    pub fn redo(&mut self) {
+        self.end_change();
+        if let Some(snapshot) = self.redo.pop() {
+            self.undo.push(self.snapshot());
+            self.restore(snapshot);
         }
     }
 
@@ -194,6 +293,45 @@ pub fn write_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grouped_changes_undo_and_redo_as_one_edit() {
+        let mut b = Buffer::from_text("éone\nlast\n");
+        b.begin_change();
+        b.replace(1, 4, "two");
+        b.insert("!");
+        b.end_change();
+        assert_eq!(b.text(), "étwo!\nlast\n");
+        b.undo();
+        assert_eq!(b.text(), "éone\nlast\n");
+        b.redo();
+        assert_eq!(b.text(), "étwo!\nlast\n");
+        b.undo();
+        b.insert("x");
+        b.redo();
+        assert_eq!(b.text(), "xéone\nlast\n");
+    }
+
+    #[test]
+    fn offsets_are_unicode_characters_and_trailing_newline_is_not_a_row() {
+        let mut b = Buffer::from_text("é界\r\nlast\r\n");
+        assert_eq!(b.lines.len(), 2);
+        b.set_offset(4);
+        assert_eq!((b.row, b.col), (1, 1));
+        assert_eq!(b.offset(), 4);
+        b.replace(1, 4, "🙂");
+        assert_eq!(b.text(), "é🙂ast\r\n");
+    }
+
+    #[test]
+    fn deleting_all_lines_leaves_an_empty_buffer() {
+        let mut b = Buffer::from_text("one\ntwo\n");
+        b.replace_lines(0, 2, &[]);
+        assert_eq!(b.text(), "");
+        assert_eq!(b.lines, [""]);
+        b.undo();
+        assert_eq!(b.text(), "one\ntwo\n");
+    }
 
     #[test]
     fn unicode_editing_and_line_merges() {

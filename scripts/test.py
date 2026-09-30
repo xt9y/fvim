@@ -36,13 +36,13 @@ def install_test(root):
         run("make", "install", env=env)
         assert init.read_text(encoding="utf-8") == "-- preserved\n"
         binary = prefix / "bin" / ("fvim.exe" if os.name == "nt" else "fvim")
-        assert run(str(binary), "--version") == "fvim 0.1.0"
+        assert run(str(binary), "--version") == "fvim 0.2.0"
         if registry:
             path, _ = winreg.QueryValueEx(registry, "Path")
             parts = [p.rstrip("\\").casefold() for p in path.split(";")]
             assert parts.count(str(binary.parent.resolve()).rstrip("\\").casefold()) == 1, f"Expected {binary.parent}; fvim entries: {[p for p in parts if 'fvim' in p]}"
             fresh = dict(env, PATH=path + ";" + os.environ["PATH"])
-            assert run("cmd.exe", "/d", "/c", "fvim --version", env=fresh) == "fvim 0.1.0"
+            assert run("cmd.exe", "/d", "/c", "fvim --version", env=fresh) == "fvim 0.2.0"
         else:
             assert Path(run("sh", "-c", '. "$HOME/.profile"; command -v fvim', env=env)).resolve() == binary.resolve()
             for name in (".profile", ".bashrc", ".zshrc"):
@@ -81,11 +81,58 @@ def sudo_install_test(root):
         init = config / "init.lua"
         assert init.is_file()
         assert init.stat().st_uid == os.getuid(), "Sudo installation must create user-owned config."
-        assert run(str(prefix / "bin/fvim"), "--version") == "fvim 0.1.0"
+        assert run(str(prefix / "bin/fvim"), "--version") == "fvim 0.2.0"
         print("Sudo install and invoking-user configuration ownership passed.")
     finally:
         if prefix.exists():
             run("sudo", "-n", "chown", "-R", f"{os.getuid()}:{os.getgid()}", str(prefix))
+
+
+def exercise_editor(send, expect, clear, path):
+    expect(b"NORMAL")
+    clear()
+    send(b"ihello\rworld\x13")
+    expect(b"Saved.")
+    assert path.read_bytes() == b"hello\nworld"
+    clear()
+    send(b"\x1b")
+    expect(b"NORMAL")
+    clear()
+    send(b"gg0cwHELLO")
+    expect(b"INSERT")
+    clear()
+    send(b"\x1b")
+    expect(b"NORMAL")
+    clear()
+    send(b":%s/world/EARTH/gc\r")
+    expect(b"replace with EARTH")
+    clear()
+    send(b"y")
+    expect(b"1 substitutions")
+    clear()
+    send(b":w\r")
+    expect(b"Saved.")
+    assert path.read_bytes() == b"HELLO\nEARTH"
+    clear()
+    send(b"u:w\r")
+    expect(b"Saved.")
+    assert path.read_bytes() == b"HELLO\nworld"
+    clear()
+    send(b"\x12:w\r")  # Ctrl-R redo.
+    expect(b"Saved.")
+    assert path.read_bytes() == b"HELLO\nEARTH"
+    clear()
+    send(b"0vld:w\r")
+    expect(b"Saved.")
+    assert path.read_bytes() == b"HELLO\nRTH"
+    clear()
+    send(b"u:w\r")
+    expect(b"Saved.")
+    assert path.read_bytes() == b"HELLO\nEARTH"
+    clear()
+    send(b"iX\x11")
+    expect(b"Unsaved changes.")
+    send(b"\x11")
 
 
 def windows_terminal_test(binary, root):
@@ -198,23 +245,17 @@ def windows_terminal_test(binary, root):
             check(k.WriteFile(input_write, data, len(data), c.byref(count), None))
             assert count.value == len(data)
 
-        expect(b"Ctrl-S save")
-        with condition:
-            transcript.clear()
-        send(b"hello\rworld\x13")
-        expect(b"Saved.")
-        assert path.read_bytes() == b"hello\nworld"
-        with condition:
-            transcript.clear()
-        send(b"X\x11")
-        expect(b"Unsaved changes.")
-        send(b"\x11")
+        def clear():
+            with condition:
+                transcript.clear()
+
+        exercise_editor(send, expect, clear, path)
         assert k.WaitForSingleObject(process.hProcess, 10000) == 0, "Editor did not exit."
         exit_code = w.DWORD()
         check(k.GetExitCodeProcess(process.hProcess, c.byref(exit_code)))
         assert exit_code.value == 0
-        assert path.read_bytes() == b"hello\nworld"
-        print("ConPTY: editing, saving and discard confirmation passed.")
+        assert path.read_bytes() == b"HELLO\nEARTH"
+        print("ConPTY: Vim modes, operators, visual selection, substitution, undo/redo and saving passed.")
     finally:
         if process.hProcess:
             if k.WaitForSingleObject(process.hProcess, 0) != 0:
@@ -281,22 +322,14 @@ def terminal_test(binary, root):
         raise AssertionError(f"Terminal did not emit {text!r}: {bytes(transcript)!r}")
 
     try:
-        expect(b"Ctrl-S save")
-        transcript.clear()
-        os.write(input_fd, b"hello\rworld\x13")
-        expect(b"Saved.")
-        assert path.read_bytes() == b"hello\nworld"
-        transcript.clear()
-        os.write(input_fd, b"X\x11")
-        expect(b"Unsaved changes.")
-        os.write(input_fd, b"\x11")
+        exercise_editor(lambda data: os.write(input_fd, data), expect, transcript.clear, path)
         assert process.wait(timeout=10) == 0
-        assert path.read_bytes() == b"hello\nworld"
+        assert path.read_bytes() == b"HELLO\nEARTH"
         if sys.platform != "darwin":
             attrs = termios.tcgetattr(master)
             assert attrs[3] & termios.ICANON
             assert attrs[3] & termios.ECHO
-        print("PTY: editing, saving and discard confirmation passed.")
+        print("PTY: Vim modes, operators, visual selection, substitution, undo/redo and saving passed.")
     finally:
         if process.poll() is None:
             process.kill()

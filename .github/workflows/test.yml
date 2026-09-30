@@ -91,10 +91,11 @@ jobs:
           python scripts/test.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Rust formatting
+      - name: Rust formatting and lint
         if: matrix.os == 'ubuntu-24.04'
         shell: bash
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
-          rustup component add rustfmt
+          rustup component add rustfmt clippy
           cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings

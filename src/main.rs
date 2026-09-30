@@ -1,17 +1,18 @@
 mod buffer;
+mod command;
+mod editor;
 mod install;
+mod motion;
 
 use buffer::Buffer;
 use crossterm::{
-    cursor::{Hide, MoveTo, Show},
-    event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
-        KeyModifiers,
-    },
+    cursor::{Hide, MoveTo, SetCursorStyle, Show},
+    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind},
     execute, queue,
     style::{Attribute, Print, ResetColor, SetAttribute},
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use editor::{Editor, Mode};
 use std::env;
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
@@ -39,6 +40,7 @@ impl Drop for Terminal {
         let _ = execute!(
             io::stdout(),
             ResetColor,
+            SetCursorStyle::DefaultUserShape,
             SetAttribute(Attribute::Reset),
             Show,
             DisableBracketedPaste,
@@ -64,27 +66,33 @@ fn display_column(line: &str, chars: usize) -> usize {
         .fold(0, |col, ch| col + char_width(ch, col))
 }
 
-fn visible_line(line: &str, left: usize, width: usize) -> String {
-    let mut output = String::new();
+fn visible_cells(line: &str, left: usize, width: usize) -> Vec<(usize, String)> {
+    let mut output = Vec::new();
     let mut column = 0;
-    for ch in line.chars() {
+    for (index, ch) in line.chars().enumerate() {
         let size = char_width(ch, column);
         let end = column + size;
-        if size == 0 {
+        let text = if size == 0 {
             if column > left && column <= left + width {
-                output.push(ch);
+                ch.to_string()
+            } else {
+                String::new()
             }
         } else if column >= left && end <= left + width {
             if ch == '\t' {
-                output.push_str(&" ".repeat(size));
+                " ".repeat(size)
             } else if ch.is_control() {
-                output.push('?');
+                "?".to_owned()
             } else {
-                output.push(ch);
+                ch.to_string()
             }
         } else if end > left && column < left + width {
-            let count = end.min(left + width) - column.max(left);
-            output.push_str(&" ".repeat(count));
+            " ".repeat(end.min(left + width) - column.max(left))
+        } else {
+            String::new()
+        };
+        if !text.is_empty() {
+            output.push((index, text));
         }
         column = end;
         if column > left + width {
@@ -94,7 +102,15 @@ fn visible_line(line: &str, left: usize, width: usize) -> String {
     output
 }
 
-fn render(buffer: &Buffer, top: &mut usize, left: &mut usize, message: &str) -> io::Result<()> {
+fn visible_line(line: &str, left: usize, width: usize) -> String {
+    visible_cells(line, left, width)
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect()
+}
+
+fn render(editor: &Editor, top: &mut usize, left: &mut usize) -> io::Result<()> {
+    let buffer = &editor.buffer;
     let (width, height) = terminal::size()?;
     if width == 0 || height < 3 {
         return Ok(());
@@ -117,7 +133,21 @@ fn render(buffer: &Buffer, top: &mut usize, left: &mut usize, message: &str) -> 
     for screen_row in 0..rows {
         queue!(out, MoveTo(0, screen_row as u16))?;
         if let Some(line) = buffer.lines.get(*top + screen_row) {
-            queue!(out, Print(visible_line(line, *left, columns)))?;
+            for (col, text) in visible_cells(line, *left, columns) {
+                queue!(
+                    out,
+                    SetAttribute(if editor.selected(*top + screen_row, col) {
+                        Attribute::Reverse
+                    } else {
+                        Attribute::Reset
+                    }),
+                    Print(text)
+                )?;
+            }
+            if line.is_empty() && editor.selected(*top + screen_row, 0) {
+                queue!(out, SetAttribute(Attribute::Reverse), Print(" "))?;
+            }
+            queue!(out, SetAttribute(Attribute::Reset))?;
         } else {
             queue!(out, Print("~"))?;
         }
@@ -129,7 +159,8 @@ fn render(buffer: &Buffer, top: &mut usize, left: &mut usize, message: &str) -> 
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| "[No Name]".to_owned());
     let status = format!(
-        " {}{} | {}:{} | Ctrl-S save  Ctrl-Q quit  Ctrl-Z undo",
+        " {} {}{} | {}:{} | Ctrl-S save  Ctrl-Q quit",
+        editor.mode_name(),
         name,
         if buffer.dirty() { " [+]" } else { "" },
         buffer.row + 1,
@@ -142,10 +173,24 @@ fn render(buffer: &Buffer, top: &mut usize, left: &mut usize, message: &str) -> 
         Print(visible_line(&status, 0, columns)),
         SetAttribute(Attribute::Reset),
         MoveTo(0, height - 1),
-        Print(visible_line(message, 0, columns)),
-        MoveTo((cursor - *left) as u16, (buffer.row - *top) as u16),
+        Print(visible_line(&editor.command_line(), 0, columns)),
+        if editor.mode == Mode::Insert {
+            SetCursorStyle::SteadyBar
+        } else {
+            SetCursorStyle::SteadyBlock
+        },
         Show
     )?;
+    if let Some(p) = &editor.prompt {
+        let col = display_column(&format!("{}{}", p.kind, p.text), p.text.chars().count() + 1)
+            .min(columns - 1);
+        queue!(out, MoveTo(col as u16, height - 1))?;
+    } else {
+        queue!(
+            out,
+            MoveTo((cursor - *left) as u16, (buffer.row - *top) as u16)
+        )?;
+    }
     out.flush()
 }
 
@@ -153,65 +198,19 @@ fn edit(path: Option<PathBuf>) -> io::Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(io::Error::other("Interactive editing requires a terminal."));
     }
-    let mut buffer = Buffer::open(path)?;
+    let mut editor = Editor::new(Buffer::open(path)?);
     let _terminal = Terminal::enter()?;
     let (mut top, mut left) = (0, 0);
-    let mut message = String::new();
-    let mut discard_armed = false;
     loop {
-        render(&buffer, &mut top, &mut left, &message)?;
+        editor.page_rows = usize::from(terminal::size()?.1.saturating_sub(2));
+        render(&editor, &mut top, &mut left)?;
         match event::read()? {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
-                    if !buffer.dirty() || discard_armed {
-                        return Ok(());
-                    }
-                    discard_armed = true;
-                    message = "Unsaved changes. Ctrl-Q again discards them.".to_owned();
-                    continue;
-                }
-                discard_armed = false;
-                message.clear();
-                if key.modifiers.contains(KeyModifiers::CONTROL) {
-                    match key.code {
-                        KeyCode::Char('s') => {
-                            message = match buffer.save() {
-                                Ok(()) => "Saved.".to_owned(),
-                                Err(error) => format!("Save failed: {error}"),
-                            };
-                        }
-                        KeyCode::Char('z') => buffer.undo(),
-                        _ => {}
-                    }
-                    continue;
-                }
-                match key.code {
-                    KeyCode::Left => buffer.move_cursor(-1, 0),
-                    KeyCode::Right => buffer.move_cursor(1, 0),
-                    KeyCode::Up => buffer.move_cursor(0, -1),
-                    KeyCode::Down => buffer.move_cursor(0, 1),
-                    KeyCode::Home => buffer.col = 0,
-                    KeyCode::End => buffer.col = buffer.lines[buffer.row].chars().count(),
-                    KeyCode::PageUp => {
-                        buffer.move_cursor(0, -(terminal::size()?.1.saturating_sub(2) as isize))
-                    }
-                    KeyCode::PageDown => {
-                        buffer.move_cursor(0, terminal::size()?.1.saturating_sub(2) as isize)
-                    }
-                    KeyCode::Enter => buffer.insert("\n"),
-                    KeyCode::Backspace => buffer.backspace(),
-                    KeyCode::Delete => buffer.delete(),
-                    KeyCode::Tab => buffer.insert("\t"),
-                    KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::ALT) => {
-                        buffer.insert(&ch.to_string())
-                    }
-                    _ => {}
+                if editor.key(key) {
+                    return Ok(());
                 }
             }
-            Event::Paste(text) => {
-                discard_armed = false;
-                buffer.insert(&text);
-            }
+            Event::Paste(text) => editor.paste(&text),
             _ => {}
         }
     }
@@ -223,7 +222,7 @@ fn run() -> io::Result<()> {
     match first.as_deref().and_then(|s| s.to_str()) {
         Some("--version") => println!("fvim {}", env!("CARGO_PKG_VERSION")),
         Some("--help") | Some("-h") => println!(
-            "fvim [file]\nCtrl-S save | Ctrl-Q quit | Ctrl-Z undo\n--version | --config-path"
+            "fvim [file]\ni insert | Esc normal | :w save | :q quit | u undo | Ctrl-R redo\nCtrl-S save | Ctrl-Q quit (twice to discard)\n--version | --config-path"
         ),
         Some("--config-path") => println!("{}", install::config_dir()?.join("init.lua").display()),
         Some("--install") => install::install()?,
@@ -234,7 +233,7 @@ fn run() -> io::Result<()> {
         }
         _ => {
             if args.next().is_some() {
-                return Err(io::Error::other("Stage 1 opens one file at a time."));
+                return Err(io::Error::other("Open one file at a time; use :e to switch files."));
             }
             return edit(first.map(PathBuf::from));
         }
