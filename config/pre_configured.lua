@@ -52,3 +52,42 @@ fvim.themes = {
     default = { dark = {}, light = {} },
 }
 vim.cmd.colorscheme('retrobox')
+
+-- Native workflows. init.lua can replace or delete these mappings.
+fvim.workflow = {
+    timeout_ms = 500,
+    make = { 'make' },
+    exclude = { '.git', 'target', 'node_modules', '.cache', 'build' },
+    max_files = 20000,
+    max_bytes = 1048576,
+}
+vim.keymap.set('n', '<leader><leader>', 'files')
+vim.keymap.set('n', '<leader><CR>', 'grep')
+vim.keymap.set('n', 'hh', 'vsplit')
+vim.keymap.set('n', 'vv', 'split')
+vim.keymap.set('n', 'mm', 'make')
+vim.keymap.set('n', 'cc', 'config')
+vim.keymap.set('n', 'gcc', 'comment')
+vim.keymap.set('n', 'gbc', 'blockcomment')
+vim.keymap.set('v', 'gcc', 'comment')
+vim.keymap.set('v', 'gbc', 'blockcomment')
+vim.filetype.add { extension = {
+    c='c', h='c', cpp='cpp', hpp='cpp', cc='cpp', rs='rust',
+    lua='lua', py='python', sh='sh', ll='llvm', llvm='llvm',
+    zig='zig', odin='odin', hlsl='hlsl', hlsli='hlsl',
+} }
+fvim.comments = {
+    c={line='//', open='/*', close='*/'},
+    cpp={line='//', open='/*', close='*/'},
+    rust={line='//', open='/*', close='*/'},
+    zig={line='//'}, odin={line='//', open='/*', close='*/'},
+    hlsl={line='//', open='/*', close='*/'}, llvm={line=';'},
+    lua={line='--', open='--[[', close=']]'},
+    python={line='#'}, sh={line='#'},
+}
+fvim.filetype_options = {
+    llvm={tabstop=2, shiftwidth=2, expandtab=true},
+    zig={tabstop=4, shiftwidth=4, expandtab=true},
+    odin={tabstop=4, shiftwidth=4, expandtab=false},
+    hlsl={tabstop=4, shiftwidth=4, expandtab=true},
+}

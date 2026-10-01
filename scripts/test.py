@@ -274,6 +274,42 @@ def exercise_editor(send, expect, clear, path):
     expect(b"Saved.")
     expect_file(path, b"HELLO\nEARTH")
     clear()
+    # Native workflow layer, exercised through the actual installed terminal binary.
+    shader = path.parent / "workflow.hlsl"
+    shader.write_bytes(b"alpha\nbeta")
+    clear()
+    send(b":e workflow.hlsl\r")
+    expect(b"workflow.hlsl")
+    clear()
+    send(b"gcc:w\r")
+    expect(b"Saved.")
+    expect_file(shader, b"// alpha\nbeta")
+    clear()
+    send(b"  workflow.hlsl")
+    expect(b"1 results")
+    clear()
+    send(b"hh")
+    expect(b"workflow.hlsl")
+    clear()
+    send(b" \rbeta")
+    expect(b"workflow.hlsl:2:1: beta")
+    clear()
+    send(b"\r")
+    expect(b"workflow.hlsl")
+    clear()
+    send(b"iG\x13")
+    expect(b"Saved.")
+    expect_file(shader, b"// alpha\nGbeta")
+    clear()
+    send(b"\x1b")
+    expect(b"\x1b[2 q")
+    clear()
+    send(b":q\r")
+    expect(b"workflow.hlsl")
+    clear()
+    send(b":e edited.txt\r")
+    expect(b"edited.txt")
+    clear()
     send(b"iX\x11")
     expect(b"Unsaved changes.")
     send(b"\x11")
@@ -358,7 +394,7 @@ def windows_terminal_test(binary, root):
         startup.lpAttributeList = c.cast(attributes, pointer)
         command = c.create_unicode_buffer(subprocess.list2cmdline([str(binary), str(path)]))
         check(k.CreateProcessW(str(binary), command, None, None, False, 0x00080000,
-                               None, None, c.byref(startup), c.byref(process)))
+                               None, str(root), c.byref(startup), c.byref(process)))
         k.CloseHandle(input_read)
         input_read = handle()
         k.CloseHandle(output_write)
@@ -434,7 +470,7 @@ def _terminal_test(binary, root):
             ["/usr/bin/script", "-q", "/dev/null", "/bin/sh", "-c",
              'stty rows 24 cols 80; exec "$@"', "fvim-test", str(binary), str(path)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            env=dict(os.environ, TERM="xterm-256color"), close_fds=False)
+            env=dict(os.environ, TERM="xterm-256color"), cwd=root, close_fds=False)
         master = process.stdout.fileno()
         input_fd = process.stdin.fileno()
     else:
@@ -445,7 +481,7 @@ def _terminal_test(binary, root):
         process = subprocess.Popen(
             [str(binary), str(path)], stdin=slave, stdout=slave, stderr=slave,
             env=dict(os.environ, TERM="xterm-256color"),
-            start_new_session=True, preexec_fn=controlling_terminal)
+            start_new_session=True, preexec_fn=controlling_terminal, cwd=root)
         os.close(slave)
         input_fd = master
     transcript = bytearray()

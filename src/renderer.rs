@@ -92,6 +92,10 @@ impl Renderer {
     }
 
     pub(crate) fn prepare(&mut self, editor: &Editor, size: (u16, u16)) -> Option<Update> {
+        self.prepare_inner(editor, size, false)
+    }
+
+    fn prepare_inner(&mut self, editor: &Editor, size: (u16, u16), pane: bool) -> Option<Update> {
         let (width, height) = size;
         if width == 0 || height == 0 {
             self.size = None;
@@ -120,10 +124,13 @@ impl Renderer {
         } else {
             mode_message.clone()
         };
-        let commands = s
-            .cmdheight
-            .max(usize::from(!command.is_empty()))
-            .min(usize::from(height));
+        let commands = if pane {
+            0
+        } else {
+            s.cmdheight
+                .max(usize::from(!command.is_empty()))
+                .min(usize::from(height))
+        };
         let status = usize::from(s.laststatus >= 2 && usize::from(height) > commands + 1);
         let rows = usize::from(height) - commands - status;
         let columns = usize::from(width);
@@ -315,7 +322,7 @@ impl Renderer {
                 self.changed.push(row);
             }
         }
-        let (x, y) = if let Some(p) = &editor.prompt {
+        let (x, y) = if let Some(p) = editor.prompt.as_ref().filter(|_| !pane) {
             (
                 display_column(
                     &format!("{}{}", p.kind, p.text),
@@ -350,6 +357,211 @@ impl Renderer {
         Some(update)
     }
 
+    pub fn draw_workspace(
+        &mut self,
+        workspace: &mut crate::workspace::Workspace,
+        size: (u16, u16),
+        out: &mut impl Write,
+    ) -> io::Result<()> {
+        if workspace.windows.iter().flatten().count() == 1 && workspace.picker.is_none() {
+            let editor = workspace.editor_mut();
+            editor.page_rows = (size.1 as usize)
+                .saturating_sub(editor.settings.cmdheight)
+                .saturating_sub(usize::from(editor.settings.laststatus >= 2));
+            return self.draw(editor, size, out);
+        }
+        let (width, height) = size;
+        if width == 0 || height == 0 {
+            self.invalidate();
+            return Ok(());
+        }
+        let s = &workspace.settings;
+        let normal = s.highlight("Normal");
+        let active = workspace.active;
+        let active_buffer = workspace.windows[active].as_ref().unwrap().buffer;
+        let saved = (workspace.editor().buffer.row, workspace.editor().buffer.col);
+        let command = workspace.editor().command_line();
+        let command = if command.is_empty() && s.showmode && workspace.editor().mode != Mode::Normal
+        {
+            format!("-- {} --", workspace.editor().mode_name())
+        } else {
+            command
+        };
+        let commands = s
+            .cmdheight
+            .max(usize::from(!command.is_empty()))
+            .max(1)
+            .min(height as usize);
+        let rects = workspace.rectangles(width, height.saturating_sub(commands as u16));
+        let mut pieces: Vec<Vec<(u16, Line)>> = (0..height).map(|_| vec![]).collect();
+        let mut cursor = (0, 0, false);
+        let shape = if workspace.editor().mode == Mode::Insert {
+            s.insert_cursor.clone()
+        } else {
+            s.normal_cursor.clone()
+        };
+        let mut active_rows = 0;
+        for (id, r) in rects {
+            let w = workspace.windows[id].as_mut().unwrap();
+            let e = &mut workspace.buffers[w.buffer];
+            let position = (e.buffer.row, e.buffer.col);
+            let mode = e.mode;
+            let (row, col) = if id == active { saved } else { (w.row, w.col) };
+            e.buffer.row = row.min(e.buffer.lines.len() - 1);
+            e.buffer.col = col.min(
+                e.buffer.lines[e.buffer.row]
+                    .chars()
+                    .count()
+                    .saturating_sub(usize::from(e.mode != Mode::Insert)),
+            );
+            if id != active {
+                e.mode = Mode::Normal;
+            }
+            let border = u16::from(r.x + r.width < width && r.width > 1);
+            let pane_width = r.width - border;
+            e.page_rows =
+                r.height
+                    .saturating_sub(u16::from(e.settings.laststatus >= 2)) as usize;
+            if id == active {
+                active_rows = e.page_rows;
+            }
+            if let Some(u) = w.renderer.prepare_inner(e, (pane_width, r.height), true) {
+                if id == active {
+                    cursor = (r.x + u.cursor.0, r.y + u.cursor.1, u.cursor.2);
+                }
+                for (row, line) in w.renderer.lines.iter().enumerate() {
+                    let mut line = line.clone();
+                    let cells = unicode_width::UnicodeWidthStr::width(line.text.as_str());
+                    line.add(
+                        &" ".repeat((pane_width as usize).saturating_sub(cells)),
+                        normal,
+                    );
+                    if border > 0 {
+                        line.add("│", workspace.settings.highlight("LineNr"));
+                    }
+                    pieces[r.y as usize + row].push((r.x, line));
+                }
+            }
+            e.buffer.row = position.0;
+            e.buffer.col = position.1;
+            e.mode = mode;
+        }
+        workspace.buffers[active_buffer].page_rows = active_rows;
+        workspace.buffers[active_buffer].buffer.row = saved.0;
+        workspace.buffers[active_buffer].buffer.col = saved.1;
+        let mut frame = Vec::new();
+        for mut row in pieces {
+            row.sort_by_key(|p| p.0);
+            let mut line = Line::default();
+            for (_, piece) in row {
+                line.append(piece);
+            }
+            frame.push(line);
+        }
+        let command_row = height as usize - commands;
+        frame[command_row] = Line::visible(
+            &command,
+            0,
+            width as usize,
+            workspace.settings.tabstop,
+            normal,
+            normal,
+            |_| false,
+        );
+        if let Some(p) = &workspace.editor().prompt {
+            cursor = (
+                display_column(
+                    &format!("{}{}", p.kind, p.text),
+                    p.text.chars().count() + 1,
+                    workspace.settings.tabstop,
+                )
+                .min(width as usize - 1) as u16,
+                command_row as u16,
+                false,
+            );
+        }
+        if let Some(p) = &workspace.picker {
+            let title = format!("{} > {}", if p.grep { "Grep" } else { "Files" }, p.query);
+            frame[0] = Line::visible(
+                &title,
+                0,
+                width as usize,
+                workspace.settings.tabstop,
+                workspace.settings.highlight("StatusLine"),
+                normal,
+                |_| false,
+            );
+            let available = height.saturating_sub(2) as usize;
+            let top = p.selected.saturating_sub(available.saturating_sub(1));
+            for row in 0..available {
+                let label = p
+                    .entries
+                    .get(top + row)
+                    .map(|e| {
+                        format!(
+                            "{} {}",
+                            if top + row == p.selected { ">" } else { " " },
+                            e.label
+                        )
+                    })
+                    .unwrap_or_default();
+                frame[row + 1] = Line::visible(
+                    &label,
+                    0,
+                    width as usize,
+                    workspace.settings.tabstop,
+                    if top + row == p.selected {
+                        workspace.settings.highlight("Visual")
+                    } else {
+                        normal
+                    },
+                    normal,
+                    |_| false,
+                );
+            }
+            frame[height as usize - 1] = Line::visible(
+                &format!("{} | Enter open | hh/vv split | Esc close", p.message),
+                0,
+                width as usize,
+                workspace.settings.tabstop,
+                normal,
+                normal,
+                |_| false,
+            );
+            cursor = (
+                display_column(&title, title.chars().count(), workspace.settings.tabstop)
+                    .min(width as usize - 1) as u16,
+                0,
+                true,
+            );
+        }
+        let theme_changed = self.theme.as_ref().is_none_or(|(rgb, hl)| {
+            *rgb != workspace.settings.termguicolors || hl != &workspace.settings.highlights
+        });
+        let clear = self.size != Some(size) || theme_changed;
+        self.changed.clear();
+        for (row, line) in frame.iter().enumerate() {
+            if clear || self.lines.get(row) != Some(line) {
+                self.changed.push(row);
+            }
+        }
+        let update = Update {
+            clear,
+            cursor,
+            cursor_changed: self.cursor != Some(cursor),
+            style_changed: self.cursor.is_none() || self.cursor_style != shape,
+        };
+        self.lines = frame;
+        self.size = Some(size);
+        self.cursor = Some(cursor);
+        self.cursor_style = shape;
+        self.theme = Some((
+            workspace.settings.termguicolors,
+            workspace.settings.highlights.clone(),
+        ));
+        self.paint(update, &workspace.settings, out)
+    }
+
     pub fn draw(
         &mut self,
         editor: &Editor,
@@ -359,8 +571,17 @@ impl Renderer {
         let Some(update) = self.prepare(editor, size) else {
             return Ok(());
         };
-        let rgb = editor.settings.termguicolors;
-        let normal = editor.settings.highlight("Normal");
+        self.paint(update, &editor.settings, out)
+    }
+
+    fn paint(
+        &mut self,
+        update: Update,
+        settings: &Settings,
+        out: &mut impl Write,
+    ) -> io::Result<()> {
+        let rgb = settings.termguicolors;
+        let normal = settings.highlight("Normal");
         let repaint = !self.changed.is_empty();
         if repaint {
             queue!(out, Hide)?;
@@ -399,6 +620,52 @@ mod tests {
     use super::*;
     use crate::buffer::Buffer;
     use crate::editor::{Editor, Mode, Visual};
+
+    #[test]
+    fn paging_uses_the_active_panes_height() {
+        let mut w = crate::workspace::Workspace::new(
+            Buffer::from_text(&"line\n".repeat(100)),
+            std::path::PathBuf::from("."),
+        );
+        w.command("split").unwrap();
+        w.command("split").unwrap();
+        w.focus(0);
+        Renderer::default()
+            .draw_workspace(&mut w, (80, 25), &mut Vec::new())
+            .unwrap();
+        assert_eq!(w.editor().page_rows, 11);
+    }
+
+    #[test]
+    fn workspace_splits_render_shared_edits_and_tiny_terminal_bounds() {
+        let mut w = crate::workspace::Workspace::new(
+            Buffer::from_text("alpha\nbeta"),
+            std::path::PathBuf::from("."),
+        );
+        w.command("vsplit").unwrap();
+        w.command("split").unwrap();
+        let mut r = Renderer::default();
+        let mut output = Vec::new();
+        for width in 1..15 {
+            for height in 1..8 {
+                r.draw_workspace(&mut w, (width, height), &mut output)
+                    .unwrap();
+                assert!(r.cursor.unwrap().0 < width && r.cursor.unwrap().1 < height);
+                assert_eq!(r.lines.len(), height as usize);
+                for line in &r.lines {
+                    assert!(
+                        unicode_width::UnicodeWidthStr::width(line.text.as_str()) <= width as usize
+                    );
+                }
+                output.clear();
+            }
+        }
+        r.draw_workspace(&mut w, (80, 24), &mut output).unwrap();
+        assert!(r.lines.iter().any(|l| l.text.matches("alpha").count() == 2));
+        output.clear();
+        r.draw_workspace(&mut w, (80, 24), &mut output).unwrap();
+        assert!(output.is_empty());
+    }
 
     #[test]
     fn native_layout_uses_gutters_full_statusline_and_command_area() {

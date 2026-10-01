@@ -6,7 +6,9 @@ mod install;
 mod motion;
 #[cfg(test)]
 mod performance;
+mod picker;
 mod renderer;
+mod workspace;
 
 use buffer::Buffer;
 use crossterm::{
@@ -19,12 +21,12 @@ use crossterm::{
     style::{Attribute, ResetColor, SetAttribute},
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use editor::Editor;
 use renderer::Renderer;
 use std::env;
 use std::io::{self, BufWriter, IsTerminal};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use workspace::Workspace;
 
 struct Terminal;
 
@@ -63,48 +65,54 @@ fn edit(path: Option<PathBuf>) -> io::Result<()> {
     }
     let config_dir = install::config_dir()?;
     let mut config = config::Config::load(&config_dir).map_err(io::Error::other)?;
-    let mut editor = Editor::new(Buffer::open(path)?);
-    editor.settings = config.settings.clone();
+    let mut workspace = Workspace::new(Buffer::open(path)?, config_dir.clone());
+    workspace.apply_settings(config.settings.clone());
     let _terminal = Terminal::enter()?;
     let mut renderer = Renderer::default();
-    let mut out = BufWriter::with_capacity(editor.settings.output_buffer_size, io::stdout().lock());
+    let mut out =
+        BufWriter::with_capacity(workspace.settings.output_buffer_size, io::stdout().lock());
     let mut redraw = true;
     loop {
         if redraw {
             let size = terminal::size()?;
-            editor.page_rows = usize::from(size.1)
-                .saturating_sub(editor.settings.cmdheight)
-                .saturating_sub(usize::from(editor.settings.laststatus >= 2));
-            renderer.draw(&editor, size, &mut out)?;
+            renderer.draw_workspace(&mut workspace, size, &mut out)?;
         }
         redraw = true;
+        if !event::poll(std::time::Duration::from_millis(25))? {
+            let pending = workspace.has_pending_input();
+            if workspace.timeout() {
+                return Ok(());
+            }
+            redraw = pending || workspace.picker.as_mut().is_some_and(|p| p.poll());
+            continue;
+        }
         match event::read()? {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 if key.code == KeyCode::Char('l') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     renderer.invalidate();
                     continue;
                 }
-                if editor.key(key) {
+                if workspace.key(key) {
                     return Ok(());
                 }
-                if let Some(command) = editor.config_command.take() {
+                if let Some(command) = workspace.editor_mut().config_command.take() {
                     match config.command(&command, &config_dir) {
                         Ok(()) => {
-                            editor.settings = config.settings.clone();
-                            editor.message = "Configuration updated.".into();
-                            if out.capacity() != editor.settings.output_buffer_size {
+                            workspace.apply_settings(config.settings.clone());
+                            workspace.editor_mut().message = "Configuration updated.".into();
+                            if out.capacity() != workspace.settings.output_buffer_size {
                                 let writer = out.into_inner().map_err(|e| e.into_error())?;
                                 out = BufWriter::with_capacity(
-                                    editor.settings.output_buffer_size,
+                                    workspace.settings.output_buffer_size,
                                     writer,
                                 );
                             }
                         }
-                        Err(error) => editor.message = error,
+                        Err(error) => workspace.editor_mut().message = error,
                     }
                 }
             }
-            Event::Paste(text) => editor.paste(&text),
+            Event::Paste(text) => workspace.paste(&text),
             Event::Resize(..) | Event::FocusGained => renderer.invalidate(),
             _ => redraw = false,
         }

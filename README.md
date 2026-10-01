@@ -1,6 +1,6 @@
 # fvim
 
-A small terminal editor with a Rust frontend and backend. Version 0.4 adds embedded Lua configuration, Neovim-style layout and a native retrobox UI palette. Broader built-in features, syntax/language tooling and plugin compatibility are still in development.
+A small terminal editor with a Rust frontend and backend. Version 0.5 adds native buffers, real splits, project pickers, build actions, comments and filetype settings on top of embedded Lua configuration and the Neovim-style layout. Broader built-in features, syntax/language tooling and plugin compatibility are still in development.
 
 ```sh
 git clone --depth 1 https://github.com/xt9y/fvim.git
@@ -29,7 +29,38 @@ The UI provides number/sign gutters, scrolling margins, optional wrapping/word b
 
 `:set option=value`, `:set option` and `:set nooption` change supported options; common abbreviations such as `ts`, `sw`, `nu`, `rnu`, `et`, `so`, `ls`, `ch` and `stl` work. `:lua code` executes Lua, `:source` reloads both config files, and `:source file` / `:luafile file` execute one Lua file. `:colorscheme retrobox` and `:colorscheme default` select shipped UI palettes; define additional palettes in `fvim.themes`. Changing `background` switches the current palette. `vim.api.nvim_set_hl(0, group, values)` supports RGB/indexed foreground/background, bold, italic, underline, reverse and highlight links. `termguicolors=false` selects indexed colors; terminal output honors `NO_COLOR`.
 
-`fvim.opt`, `vim.opt`, `vim.o` and `vim.bo` address the current supported options. This is a small compatibility API: unimplemented options produce errors, and existing Neovim plugin configs cannot run unchanged. Keymaps, filetypes, pickers, splits, comments, build commands, Tree-sitter, language servers, completion and diagnostics are subsequent increments. Statusline formatting currently supports `%f`, `%F`, `%t`, `%m`, `%M`, `%l`, `%c`, `%v`, `%L`, `%p`, `%P`, `%=` and `%%`. `signcolumn=auto` reserves no space until diagnostic signs are implemented.
+`fvim.opt`, `vim.opt`, `vim.o` and `vim.bo` address the current supported options. This is a small compatibility API: unimplemented options produce errors, and existing Neovim plugin configs cannot run unchanged. Tree-sitter, language servers, completion and diagnostics are subsequent increments. Statusline formatting currently supports `%f`, `%F`, `%t`, `%m`, `%M`, `%l`, `%c`, `%v`, `%L`, `%p`, `%P`, `%=` and `%%`. `signcolumn=auto` reserves no space until diagnostic signs are implemented.
+
+Native workflow bindings:
+
+| Action | Default binding |
+| --- | --- |
+| Fuzzy project file picker | Space Space |
+| Project grep (Rust regular expressions) | Space Enter |
+| Vertical / horizontal split | `hh` / `vv` |
+| Save current file and run build | `mm` |
+| Open personal init.lua | `cc` |
+| Toggle line / block comment | `gcc` / `gbc` (Normal or Visual) |
+
+Inside a picker, arrows or Ctrl-N/P select results, Enter opens the selected file, and the configured split mappings (`hh` / `vv` by default) open it in a split. Ctrl-V/S also open vertical/horizontal splits; Escape closes the picker. Query text uses the same prefix timeout as mappings. `:files`, `:grep [pattern]`, `:split [file]`, `:vsplit [file]`, `:bnext`, `:bprevious`, `:buffer number`, `:buffers`, `:make`, `:config`, `:comment` and `:blockcomment` expose the same workflows. Ctrl-W followed by `h/j/k/l` moves between panes, `w` cycles, `v/s` splits and `q` closes a pane.
+
+Splits share text and undo history, with independent cursors and scroll positions. `:e file` retains the previous buffer, including unsaved edits; `:enew` creates another unnamed buffer. `:e!` reloads the current buffer before switching. `:q` closes the active pane and checks all buffers when closing the last pane; `:q!` permits closing it with unsaved changes. Ctrl-Q checks all buffers and requires a second press to discard. `:wq` saves the current file and follows the same pane/quit rules.
+
+Project scanning starts at the launch directory, runs in a worker thread, skips symlinks, and uses `fvim.workflow.exclude` directory/file names. It currently does not interpret `.gitignore`. Limits are configurable: 20,000 files and 1 MiB per grep file by default; results display at most 2,000 entries. Grep searches saved UTF-8 text, skips binary files, and opens each result at its matching Unicode column. Build commands use an executable/argument list without shell interpretation, run in the launch directory, and capture output in a new buffer after completion. A failed save prevents the build. The build waits for the child process to finish.
+
+```lua
+-- Personal workflow overrides in init.lua
+vim.keymap.del('n', 'hh')
+vim.keymap.set('n', 'zz', 'vsplit') -- also applies inside pickers
+vim.keymap.set('n', '<leader>f', ':files<CR>')
+fvim.workflow.timeout_ms = 300
+fvim.workflow.make = { 'c', 'build' }
+vim.filetype.add { extension = { shader = 'hlsl' } }
+fvim.filetype_options.hlsl = { tabstop=4, shiftwidth=2, expandtab=true }
+fvim.comments.hlsl = { line='//', open='/*', close='*/' }
+```
+
+`vim.keymap.set`/`del` support Normal (`n`) and Visual (`v`) mode mappings to the listed native actions plus buffer next/previous. Lua callbacks and arbitrary Ex mappings are not supported yet. Prefix mappings override the corresponding Vim sequence and wait up to `timeout_ms`; counts, operators, searches, Insert mode and unmatched prefixes continue through the Vim editing engine. `.ll`/`.llvm`, `.zig`, `.odin` and `.hlsl`/`.hlsli` have shipped filetype overrides and comment syntax. LLVM and Zig provide line comments only. Filetype indentation overrides the global indentation values; change `fvim.filetype_options` to customize it.
 
 `fvim --check-config` validates configuration without opening a terminal; `fvim --config-path` prints the personal config path. Errors identify the Lua file/option. Failed runtime updates retain the previous effective options/highlights; Lua filesystem/process side effects are not rolled back. Existing defaults are preserved on upgrades: new shipped defaults can be reviewed in `config/pre_configured.lua` before replacing an edited installed copy.
 

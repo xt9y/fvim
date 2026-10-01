@@ -41,7 +41,29 @@ impl Highlight {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct Keymap {
+    pub mode: String,
+    pub keys: Vec<crossterm::event::KeyEvent>,
+    pub action: String,
+}
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FileOptions {
+    pub tabstop: Option<usize>,
+    pub shiftwidth: Option<usize>,
+    pub expandtab: Option<bool>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
+    pub keymaps: Vec<Keymap>,
+    pub mapping_timeout: usize,
+    pub make_command: Vec<String>,
+    pub filetypes: HashMap<String, String>,
+    pub comments: HashMap<String, (String, String, String)>,
+    pub file_options: HashMap<String, FileOptions>,
+    pub picker_exclude: Vec<String>,
+    pub picker_max_files: usize,
+    pub picker_max_bytes: usize,
     pub number: bool,
     pub relativenumber: bool,
     pub numberwidth: usize,
@@ -81,6 +103,32 @@ impl Default for Settings {
 }
 
 impl Settings {
+    pub fn filetype(&self, path: Option<&Path>) -> String {
+        let ext = path
+            .and_then(Path::extension)
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        self.filetypes
+            .get(ext)
+            .cloned()
+            .unwrap_or_else(|| ext.into())
+    }
+    pub fn for_path(&self, path: Option<&Path>) -> Self {
+        let mut settings = self.clone();
+        if let Some(o) = self.file_options.get(&self.filetype(path)) {
+            if let Some(v) = o.tabstop {
+                settings.tabstop = v;
+            }
+            if let Some(v) = o.shiftwidth {
+                settings.shiftwidth = v;
+            }
+            if let Some(v) = o.expandtab {
+                settings.expandtab = v;
+            }
+        }
+        settings
+    }
+
     pub fn highlight(&self, group: &str) -> Highlight {
         let normal = self.highlights.get("Normal").copied().unwrap_or_default();
         self.highlights
@@ -97,7 +145,8 @@ pub struct Config {
 }
 
 const API: &str = r#"
-fvim = { _options = {}, cursor = {}, themes = {}, highlights = {} }
+fvim = { _options = {}, cursor = {}, themes = {}, highlights = {}, keymaps = {},
+    filetypes = {}, comments = {}, filetype_options = {}, workflow = {} }
 local options = setmetatable({}, {
     __index = function(_, key) return fvim._options[key] end,
     __newindex = function(_, key, value)
@@ -110,6 +159,17 @@ local options = setmetatable({}, {
 })
 fvim.opt = options
 vim = { opt = fvim.opt, o = fvim.opt, bo = fvim.opt, g = {}, api = {}, cmd = {} }
+vim.keymap = {}
+function vim.keymap.set(mode, lhs, rhs, opts)
+    assert(type(mode)=='string' and (mode=='n' or mode=='v'), 'Only n/v mappings are supported')
+    assert(type(lhs)=='string' and type(rhs)=='string', 'Mappings need string keys and native actions')
+    fvim.keymaps[mode..':'..lhs] = {mode=mode, keys=lhs, action=rhs}
+end
+function vim.keymap.del(mode, lhs) fvim.keymaps[mode..':'..lhs] = nil end
+vim.filetype = {}
+function vim.filetype.add(spec)
+    for ext, name in pairs(spec.extension or {}) do fvim.filetypes[ext] = name end
+end
 local original_fvim, original_vim = fvim, vim
 local function copy(t, seen)
     seen = seen or {}
@@ -131,7 +191,9 @@ function vim.api.nvim_set_hl(ns, group, values)
 end
 function fvim._snapshot()
     return copy({ opt=fvim._options, cursor=fvim.cursor, themes=fvim.themes,
-        highlights=fvim.highlights, output_buffer_size=fvim.output_buffer_size, g=vim.g })
+        highlights=fvim.highlights, output_buffer_size=fvim.output_buffer_size, g=vim.g,
+        keymaps=fvim.keymaps, filetypes=fvim.filetypes, comments=fvim.comments,
+        filetype_options=fvim.filetype_options, workflow=fvim.workflow })
 end
 function fvim._restore(s)
     fvim, vim = original_fvim, original_vim
@@ -139,6 +201,8 @@ function fvim._restore(s)
     fvim.opt, vim.opt, vim.o, vim.bo = options, options, options, options
     fvim.cursor, fvim.themes, fvim.highlights = s.cursor, s.themes, s.highlights
     fvim.output_buffer_size, vim.g = s.output_buffer_size, s.g
+    fvim.keymaps, fvim.filetypes, fvim.comments = s.keymaps, s.filetypes, s.comments
+    fvim.filetype_options, fvim.workflow = s.filetype_options, s.workflow
 end
 "#;
 
@@ -240,6 +304,7 @@ impl Config {
     pub fn from_scripts(defaults: &str, init: &str) -> Result<Self, String> {
         let lua = Lua::new();
         exec(&lua, API, "fvim API")?;
+        exec(&lua, DEFAULTS, "shipped pre_configured.lua")?;
         exec(&lua, defaults, "pre_configured.lua")?;
         read_settings(&lua).map_err(|e| format!("pre_configured.lua: {e}"))?;
         exec(&lua, init, "init.lua")?;
@@ -372,7 +437,122 @@ fn read_settings(lua: &Lua) -> Result<Settings, String> {
             .map_err(|e| format!("highlight {name}: {e}"))?;
         highlights.insert(name, value);
     }
+    let mut keymaps = vec![];
+    let maps: Table = get(&f, "keymaps")?;
+    let globals: Table = get(
+        &lua.globals()
+            .get::<Table>("vim")
+            .map_err(|e| e.to_string())?,
+        "g",
+    )?;
+    let leader = globals
+        .get::<Option<String>>("mapleader")
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| "\\".into());
+    for item in maps.pairs::<String, Table>() {
+        let (_, m) = item.map_err(|e| e.to_string())?;
+        let mode: String = get(&m, "mode")?;
+        let lhs: String = get(&m, "keys")?;
+        let action: String = get(&m, "action")?;
+        let action = action
+            .trim_start_matches(':')
+            .trim_end_matches("<CR>")
+            .to_owned();
+        if !matches!(
+            action.as_str(),
+            "files"
+                | "grep"
+                | "vsplit"
+                | "split"
+                | "make"
+                | "config"
+                | "comment"
+                | "blockcomment"
+                | "bnext"
+                | "bprevious"
+        ) {
+            return Err(format!("Unsupported native keymap action: {action}"));
+        }
+        let keys = parse_keys(&lhs.replace("<leader>", &leader))?;
+        if keys.is_empty() {
+            return Err("Empty keymap".into());
+        }
+        keymaps.push(Keymap { mode, keys, action });
+    }
+    keymaps.sort_by(|a, b| a.mode.cmp(&b.mode).then(a.keys.len().cmp(&b.keys.len())));
+    for (i, a) in keymaps.iter().enumerate() {
+        for b in &keymaps[i + 1..] {
+            if a.mode == b.mode && b.keys.starts_with(&a.keys) {
+                return Err("Overlapping keymap prefixes".into());
+            }
+        }
+    }
+    let filetypes = get::<Table>(&f, "filetypes")?
+        .pairs::<String, String>()
+        .collect::<Result<HashMap<_, _>, _>>()
+        .map_err(|e| e.to_string())?;
+    let mut comments = HashMap::new();
+    for item in get::<Table>(&f, "comments")?.pairs::<String, Table>() {
+        let (ft, t) = item.map_err(|e| e.to_string())?;
+        let line: String = t.get("line").map_err(|e| e.to_string())?;
+        let open: Option<String> = t.get("open").map_err(|e| e.to_string())?;
+        let close: Option<String> = t.get("close").map_err(|e| e.to_string())?;
+        comments.insert(
+            ft,
+            (line, open.unwrap_or_default(), close.unwrap_or_default()),
+        );
+    }
+    let mut file_options = HashMap::new();
+    for item in get::<Table>(&f, "filetype_options")?.pairs::<String, Table>() {
+        let (ft, t) = item.map_err(|e| e.to_string())?;
+        let tabstop: Option<usize> = t.get("tabstop").map_err(|e| e.to_string())?;
+        let shiftwidth: Option<usize> = t.get("shiftwidth").map_err(|e| e.to_string())?;
+        let expandtab: Option<bool> = t.get("expandtab").map_err(|e| e.to_string())?;
+        if tabstop.is_some_and(|n| !(1..=256).contains(&n)) || shiftwidth.is_some_and(|n| n > 256) {
+            return Err("Invalid filetype indentation".into());
+        }
+        file_options.insert(
+            ft,
+            FileOptions {
+                tabstop,
+                shiftwidth,
+                expandtab,
+            },
+        );
+    }
+    let workflow: Table = get(&f, "workflow")?;
+    let make_command = workflow
+        .get::<Option<Vec<String>>>("make")
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| vec!["make".into()]);
+    if make_command.is_empty() || make_command[0].is_empty() {
+        return Err("workflow.make needs an executable".into());
+    }
+    let picker_exclude = workflow
+        .get::<Option<Vec<String>>>("exclude")
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| vec![".git".into(), "target".into()]);
+    let limit = |key: &str, default: usize, max: usize| -> Result<usize, String> {
+        let n = workflow
+            .get::<Option<usize>>(key)
+            .map_err(|e| e.to_string())?
+            .unwrap_or(default);
+        if n == 0 || n > max {
+            Err(format!("workflow.{key} out of range"))
+        } else {
+            Ok(n)
+        }
+    };
     Ok(Settings {
+        keymaps,
+        filetypes,
+        comments,
+        file_options,
+        make_command,
+        picker_exclude,
+        mapping_timeout: limit("timeout_ms", 500, 10000)?,
+        picker_max_files: limit("max_files", 20000, 1000000)?,
+        picker_max_bytes: limit("max_bytes", 1048576, 67108864)?,
         number: get(&opt, "number")?,
         relativenumber: get(&opt, "relativenumber")?,
         numberwidth: number(&opt, "numberwidth", 1, 20)?,
@@ -397,6 +577,34 @@ fn read_settings(lua: &Lua) -> Result<Settings, String> {
         output_buffer_size: number(&f, "output_buffer_size", 1, 1_048_576)?,
         highlights,
     })
+}
+
+fn parse_keys(text: &str) -> Result<Vec<crossterm::event::KeyEvent>, String> {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut out = vec![];
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '<' {
+            out.push(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+            continue;
+        }
+        let mut token = String::new();
+        for ch in chars.by_ref() {
+            if ch == '>' {
+                break;
+            }
+            token.push(ch);
+        }
+        let code = match token.as_str() {
+            "CR" | "Enter" => KeyCode::Enter,
+            "Space" => KeyCode::Char(' '),
+            "Tab" => KeyCode::Tab,
+            "Esc" => KeyCode::Esc,
+            _ => return Err(format!("Unsupported key token: <{token}>")),
+        };
+        out.push(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+    Ok(out)
 }
 
 fn read_highlight(groups: &Table, name: &str, path: &mut Vec<String>) -> Result<Highlight, String> {
@@ -448,6 +656,32 @@ fn read_highlight(groups: &Table, name: &str, path: &mut Vec<String>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_workflow_overrides_and_rollback_reach_both_editor_and_picker() {
+        let mut c=Config::from_scripts(DEFAULTS,"vim.keymap.del('n','hh'); vim.keymap.set('n','zz','vsplit'); vim.filetype.add{extension={shader='hlsl'}}; fvim.filetype_options.hlsl.shiftwidth=2; fvim.workflow.make={'builder','arg with spaces'}").unwrap();
+        assert!(!c
+            .settings
+            .keymaps
+            .iter()
+            .any(|m| m.keys == parse_keys("hh").unwrap()));
+        assert!(c
+            .settings
+            .keymaps
+            .iter()
+            .any(|m| m.keys == parse_keys("zz").unwrap()));
+        assert_eq!(
+            c.settings.for_path(Some(Path::new("x.shader"))).shiftwidth,
+            2
+        );
+        assert_eq!(c.settings.make_command, vec!["builder", "arg with spaces"]);
+        let before = c.settings.clone();
+        assert!(c
+            .execute("vim.keymap.del('n','zz'); fvim.workflow.make={}", "live")
+            .is_err());
+        assert_eq!(c.settings, before);
+        c.execute("assert(fvim.keymaps['n:zz'])", "live").unwrap();
+    }
 
     #[test]
     fn invalid_options_are_rejected_instead_of_becoming_truthy() {

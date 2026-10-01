@@ -22,7 +22,7 @@ pub(crate) fn display_column(line: &str, chars: usize, tabstop: usize) -> usize 
         .fold(0, |col, ch| col + char_width(ch, col, tabstop))
 }
 
-#[derive(Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 pub(super) struct Line {
     pub(super) text: String,
     pub(super) spans: Vec<(usize, Highlight)>,

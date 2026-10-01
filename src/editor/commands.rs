@@ -206,6 +206,30 @@ impl Editor {
         let argument = rest[split..].trim();
         let force = name.ends_with('!');
         let name = name.trim_end_matches('!');
+        if matches!(
+            name,
+            "split"
+                | "sp"
+                | "vsplit"
+                | "vs"
+                | "bnext"
+                | "bn"
+                | "bprevious"
+                | "bp"
+                | "buffer"
+                | "b"
+                | "buffers"
+                | "ls"
+                | "files"
+                | "grep"
+                | "make"
+                | "config"
+                | "comment"
+                | "blockcomment"
+        ) {
+            self.workflow_command = Some(rest.into());
+            return Ok(false);
+        }
         match name {
             "set" | "lua" | "source" | "luafile" | "colorscheme" => {
                 if has_range {
@@ -214,6 +238,10 @@ impl Editor {
                 self.config_command = Some(rest.into());
             }
             "q" | "quit" => {
+                if self.workspace_managed {
+                    self.workflow_command = Some(rest.into());
+                    return Ok(false);
+                }
                 if self.buffer.dirty() && !force {
                     return Err("Unsaved changes. Use :q! to discard them.".into());
                 }
@@ -255,9 +283,20 @@ impl Editor {
                         .map_err(|e| format!("Save failed: {e}"))?;
                 }
                 self.message = "Saved.".into();
+                if self.workspace_managed {
+                    self.workflow_command = Some("filetype".into());
+                }
+                if self.workspace_managed && matches!(name, "wq" | "x" | "exit") {
+                    self.workflow_command = Some(if force { "q!" } else { "q" }.into());
+                    return Ok(false);
+                }
                 return Ok(matches!(name, "wq" | "x" | "exit"));
             }
             "e" | "edit" | "enew" => {
+                if self.workspace_managed {
+                    self.workflow_command = Some(rest.into());
+                    return Ok(false);
+                }
                 if has_range {
                     return Err("Invalid range for edit".into());
                 }

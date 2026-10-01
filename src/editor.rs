@@ -56,6 +56,8 @@ pub struct Prompt {
 pub struct Editor {
     pub settings: crate::config::Settings,
     pub config_command: Option<String>,
+    pub workflow_command: Option<String>,
+    pub workspace_managed: bool,
     pub buffer: Buffer,
     pub mode: Mode,
     pub message: String,
@@ -65,7 +67,7 @@ pub struct Editor {
     confirmation: Option<Confirmation>,
     visual_range: Option<(usize, usize)>,
     anchor: (usize, usize),
-    goal: Option<usize>,
+    pub(crate) goal: Option<usize>,
     count: usize,
     op: Option<(char, usize, bool)>,
     pending: Option<Pending>,
@@ -87,6 +89,8 @@ impl Editor {
         Self {
             settings: crate::config::Settings::default(),
             config_command: None,
+            workflow_command: None,
+            workspace_managed: false,
             buffer,
             mode: Mode::Normal,
             message: String::new(),
@@ -112,6 +116,87 @@ impl Editor {
             inserted: String::new(),
             block_insert: None,
         }
+    }
+
+    pub fn mapping_ready(&self) -> bool {
+        self.mode != Mode::Insert
+            && self.prompt.is_none()
+            && self.confirmation.is_none()
+            && self.pending.is_none()
+            && self.op.is_none()
+            && self.count == 0
+            && !self.register_pending
+    }
+
+    pub fn cancel_selection(&mut self) {
+        self.goal = None;
+        self.mode = Mode::Normal;
+        self.reset_command();
+        self.recording.clear();
+        self.clamp();
+    }
+
+    pub fn toggle_comment(
+        &mut self,
+        line: &str,
+        block: Option<(&str, &str)>,
+    ) -> Result<(), String> {
+        let (start, end) = if matches!(self.mode, Mode::Visual(_)) {
+            (
+                self.anchor.0.min(self.buffer.row),
+                self.anchor.0.max(self.buffer.row),
+            )
+        } else {
+            (self.buffer.row, self.buffer.row)
+        };
+        let old = self.buffer.lines[start..=end].join("\n");
+        let new = if let Some((open, close)) = block {
+            if open.is_empty() || close.is_empty() {
+                return Err("No block comment for this filetype".into());
+            }
+            if let Some(body) = old.strip_prefix(open).and_then(|s| s.strip_suffix(close)) {
+                body.strip_prefix(' ')
+                    .unwrap_or(body)
+                    .strip_suffix(' ')
+                    .unwrap_or(body.strip_prefix(' ').unwrap_or(body))
+                    .to_owned()
+            } else {
+                format!("{open} {old} {close}")
+            }
+        } else {
+            if line.is_empty() {
+                return Err("No line comment for this filetype".into());
+            }
+            let remove = self.buffer.lines[start..=end]
+                .iter()
+                .filter(|s| !s.trim().is_empty())
+                .all(|s| s.trim_start().starts_with(line));
+            self.buffer.lines[start..=end]
+                .iter()
+                .map(|s| {
+                    let body = s.trim_start();
+                    let indent = &s[..s.len() - body.len()];
+                    if body.is_empty() {
+                        return s.clone();
+                    }
+                    if remove {
+                        let body = body.strip_prefix(line).unwrap_or(body);
+                        format!("{indent}{}", body.strip_prefix(' ').unwrap_or(body))
+                    } else {
+                        format!("{indent}{line} {body}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let offset = self.buffer.offset_at(start, 0);
+        let length = old.chars().count();
+        self.buffer.begin_change();
+        self.buffer.replace(offset, offset + length, &new);
+        self.buffer.end_change();
+        self.buffer.row = start;
+        self.cancel_selection();
+        Ok(())
     }
 
     pub fn mode_name(&self) -> &'static str {
