@@ -879,9 +879,7 @@ impl Editor {
         }
         let text: String = self
             .buffer
-            .body()
-            .chars()
-            .skip(start)
+            .chars_forward(start)
             .take(end.saturating_sub(start))
             .collect();
         self.remember(text, Visual::Character, op);

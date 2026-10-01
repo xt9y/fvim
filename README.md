@@ -1,6 +1,6 @@
 # fvim
 
-A small terminal editor with a Rust frontend and backend. Stage 2 provides essential Vim editing, search and substitution. Lua execution, full Neovim built-in compatibility, settings, themes and plugins come later.
+A small terminal editor with a Rust frontend and backend. Stage 3 optimizes essential Vim editing, search and substitution. Lua execution, full Neovim built-in compatibility, settings, themes and plugins come later.
 
 ```sh
 git clone --depth 1 https://github.com/xt9y/fvim.git
@@ -31,6 +31,10 @@ Run `fvim [file]`. It starts in Normal mode. Press `i` to insert and Escape to r
 Patterns use a **subset of Vim's default magic syntax**: `. * ^ $`, character classes, `\d \s \w`, `\< \>` word boundaries, `\( \)` captures, `\|`, `\+ \? \= \{n,m}`, case switches `\c \C`, and magic switches `\v \V \m \M`. Replacements support `&`, `\0`–`\9`, literal `\&`/`\\`, `\t` and `\r` for a newline. Pattern backreferences, lookaround, `\zs`/`\ze`, replacement expressions and other advanced Vim constructs are unsupported. Invalid patterns/flags return errors. This is not full Vim/Neovim compatibility.
 
 Visual selections support deletion, change, yank, paste and indentation; Normal-only commands end the selection before running. Writing a named buffer to another file with `:w file` writes a copy and keeps unsaved changes to the original protected.
+
+Editing changes only affected lines; grouped undo stores the original changed span. Cursor offsets use indexed line lengths, dirty checks compare exact saved content incrementally, and motions visit text without copying the file. Rendering buffers output and redraws changed rows instead of clearing the screen on every key. Ctrl-L, focus return and resize force a full repaint to recover a damaged screen. Searches avoid collecting all match positions and repeatedly decoding file prefixes. Inserting/deleting rows still rebuilds the line index; wide undo spans and searches may still touch the whole file.
+
+The `TEST` workflow enforces allocation budgets and prints release-mode timing/allocation probes on every runner. Timing reports are informational because hosted CPU speed varies; deterministic allocation and rendering checks catch regressions. To reproduce the probes locally: `cargo test --release --locked -- --ignored --nocapture`.
 
 `make test` runs behavioral tests. `make clean` removes build output and installed executables named `fvim` from the standard install locations and every current PATH directory, preserving configuration and other files. Unix cleanup requests sudo when an old system copy is protected; Windows cleanup fails clearly if an executable is locked or needs elevated permissions. With `FVIM_PREFIX` set, installed-binary cleanup is confined to that prefix. Installation paths can be staged with `FVIM_PREFIX` and `FVIM_CONFIG_DIR`; `FVIM_NO_PATH=1` disables PATH changes for packaging/tests.
 

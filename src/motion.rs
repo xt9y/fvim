@@ -17,45 +17,58 @@ fn class(ch: char, big: bool) -> u8 {
     }
 }
 
-pub fn word(chars: &[char], mut pos: usize, key: char, count: usize) -> usize {
-    if chars.is_empty() {
+fn word(b: &Buffer, key: char, count: usize) -> usize {
+    let length = b.body_len();
+    if length == 0 {
         return 0;
     }
-    pos = pos.min(chars.len() - 1);
+    let mut pos = b.offset().min(length - 1);
     let big = key.is_uppercase();
     for _ in 0..count {
         match key.to_ascii_lowercase() {
             'w' => {
-                let kind = class(chars[pos], big);
-                while pos < chars.len() && class(chars[pos], big) == kind {
+                let mut chars = b.chars_forward(pos).peekable();
+                let kind = class(*chars.peek().unwrap(), big);
+                while chars.peek().is_some_and(|&ch| class(ch, big) == kind) {
+                    chars.next();
                     pos += 1;
                 }
-                while pos < chars.len() && class(chars[pos], big) == 0 {
+                while chars.peek().is_some_and(|&ch| class(ch, big) == 0) {
+                    chars.next();
                     pos += 1;
                 }
-                if pos == chars.len() {
+                if pos == length {
                     return pos;
                 }
             }
             'b' => {
-                pos = pos.saturating_sub(1);
-                while pos > 0 && class(chars[pos], big) == 0 {
+                let mut chars = b.chars_backward(pos).peekable();
+                let Some(mut ch) = chars.next() else {
+                    return 0;
+                };
+                pos -= 1;
+                while pos > 0 && class(ch, big) == 0 {
+                    ch = chars.next().unwrap();
                     pos -= 1;
                 }
-                let kind = class(chars[pos], big);
-                while pos > 0 && class(chars[pos - 1], big) == kind {
+                let kind = class(ch, big);
+                while chars.peek().is_some_and(|&ch| class(ch, big) == kind) {
+                    chars.next();
                     pos -= 1;
                 }
             }
             'e' => {
-                if pos + 1 < chars.len() {
+                if pos + 1 < length {
                     pos += 1;
                 }
-                while pos + 1 < chars.len() && class(chars[pos], big) == 0 {
+                let mut chars = b.chars_forward(pos).peekable();
+                while pos + 1 < length && chars.peek().is_some_and(|&ch| class(ch, big) == 0) {
+                    chars.next();
                     pos += 1;
                 }
-                let kind = class(chars[pos], big);
-                while pos + 1 < chars.len() && class(chars[pos + 1], big) == kind {
+                let kind = class(chars.next().unwrap(), big);
+                while chars.peek().is_some_and(|&ch| class(ch, big) == kind) {
+                    chars.next();
                     pos += 1;
                 }
             }
@@ -75,12 +88,7 @@ pub fn motion(b: &Buffer, key: char, count: usize, explicit: bool) -> Option<Mot
     let offset = match key {
         'w' | 'W' | 'b' | 'B' | 'e' | 'E' => {
             inclusive = matches!(key, 'e' | 'E');
-            word(
-                &b.body().chars().collect::<Vec<_>>(),
-                b.offset(),
-                key,
-                count,
-            )
+            word(b, key, count)
         }
         '%' if explicit => {
             row = (b
@@ -95,13 +103,15 @@ pub fn motion(b: &Buffer, key: char, count: usize, explicit: bool) -> Option<Mot
             b.offset_at(row, col)
         }
         '%' => {
-            let chars: Vec<_> = b.body().chars().collect();
             let start = b.offset();
-            let line_end = b.offset_at(b.row, length);
-            let pos = (start..line_end).find(|&i| pairs(chars[i]).is_some())?;
-            let (open, close) = pairs(chars[pos])?;
+            let (index, ch) = b
+                .chars_forward(start)
+                .take(length.saturating_sub(b.col))
+                .enumerate()
+                .find(|&(_, ch)| pairs(ch).is_some())?;
+            let (open, close) = pairs(ch)?;
             inclusive = true;
-            matching(&chars, pos, open, close)?
+            matching(b, start + index, open, close)?
         }
         '{' | '}' => {
             for _ in 0..count {
@@ -216,66 +226,69 @@ fn pairs(ch: char) -> Option<(char, char)> {
     }
 }
 
-fn matching(chars: &[char], pos: usize, open: char, close: char) -> Option<usize> {
-    let forward = chars[pos] == open;
-    let mut depth = 0usize;
-    let indices: Box<dyn Iterator<Item = usize>> = if forward {
-        Box::new(pos..chars.len())
-    } else {
-        Box::new((0..=pos).rev())
-    };
-    for i in indices {
-        if chars[i] == if forward { open } else { close } {
-            depth += 1;
-        }
-        if chars[i] == if forward { close } else { open } {
-            depth -= 1;
-            if depth == 0 {
-                return Some(i);
+fn matching(b: &Buffer, pos: usize, open: char, close: char) -> Option<usize> {
+    fn scan(chars: impl Iterator<Item = (usize, char)>, open: char, close: char) -> Option<usize> {
+        let mut depth = 0usize;
+        for (i, ch) in chars {
+            if ch == open {
+                depth += 1;
+            }
+            if ch == close {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
             }
         }
+        None
     }
-    None
+    if b.chars_forward(pos).next()? == open {
+        scan((pos..).zip(b.chars_forward(pos)), open, close)
+    } else {
+        scan((0..=pos).rev().zip(b.chars_backward(pos + 1)), close, open)
+    }
 }
 
 pub fn object(b: &Buffer, key: char, around: bool, count: usize) -> Option<(usize, usize)> {
-    let chars: Vec<_> = b.body().chars().collect();
     let pos = b.offset();
-    if pos >= chars.len() {
-        return None;
-    }
+    let current = b.chars_forward(pos).next()?;
     if matches!(key, 'w' | 'W') {
         let big = key == 'W';
-        let kind = class(chars[pos], big);
-        let mut start = pos;
-        let mut end = pos + 1;
-        while start > 0 && class(chars[start - 1], big) == kind {
-            start -= 1;
-        }
-        while end < chars.len() && class(chars[end], big) == kind {
-            end += 1;
-        }
+        let kind = class(current, big);
+        let mut start = pos
+            - b.chars_backward(pos)
+                .take_while(|&ch| class(ch, big) == kind)
+                .count();
+        let mut end = pos
+            + b.chars_forward(pos)
+                .take_while(|&ch| class(ch, big) == kind)
+                .count();
+        let mut chars = b.chars_forward(end).peekable();
         for _ in 1..count {
-            while end < chars.len() && class(chars[end], big) == 0 {
+            while chars.peek().is_some_and(|&ch| class(ch, big) == 0) {
+                chars.next();
                 end += 1;
             }
-            if end == chars.len() {
+            let Some(&ch) = chars.peek() else {
                 break;
-            }
-            let next = class(chars[end], big);
-            while end < chars.len() && class(chars[end], big) == next {
+            };
+            let next = class(ch, big);
+            while chars.peek().is_some_and(|&ch| class(ch, big) == next) {
+                chars.next();
                 end += 1;
             }
         }
         if around {
             let old = end;
-            while end < chars.len() && chars[end].is_whitespace() && chars[end] != '\n' {
-                end += 1;
-            }
+            end += b
+                .chars_forward(end)
+                .take_while(|&ch| ch.is_whitespace() && ch != '\n')
+                .count();
             if end == old {
-                while start > 0 && chars[start - 1].is_whitespace() && chars[start - 1] != '\n' {
-                    start -= 1;
-                }
+                start -= b
+                    .chars_backward(start)
+                    .take_while(|&ch| ch.is_whitespace() && ch != '\n')
+                    .count();
             }
         }
         return Some((start, end));
@@ -288,9 +301,10 @@ pub fn object(b: &Buffer, key: char, around: bool, count: usize) -> Option<(usiz
     let (start, end) = if let Some((open, close)) = pairs(key) {
         let mut found = None;
         let mut left = 0;
-        for i in (0..=pos).rev() {
-            if chars[i] == open {
-                if let Some(j) = matching(&chars, i, open, close) {
+        for (index, ch) in b.chars_backward(pos + 1).enumerate() {
+            let i = pos - index;
+            if ch == open {
+                if let Some(j) = matching(b, i, open, close) {
                     if j >= pos {
                         left += 1;
                         if left == count {
@@ -303,17 +317,22 @@ pub fn object(b: &Buffer, key: char, around: bool, count: usize) -> Option<(usiz
         }
         found?
     } else if matches!(key, '\'' | '"' | '`') {
-        let start = b.offset_at(b.row, 0);
-        let end = b.offset_at(b.row, b.lines[b.row].chars().count());
-        let quotes: Vec<_> = (start..end)
-            .filter(|&i| chars[i] == key && (i == 0 || chars[i - 1] != '\\'))
-            .collect();
-        quotes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .find(|pair| pair[0] <= pos && pos <= pair[1])
-            .map(|pair| (pair[0], pair[1]))?
+        let base = b.offset_at(b.row, 0);
+        let (mut previous, mut opening, mut found) = ('\0', None, None);
+        for (col, ch) in b.lines[b.row].chars().enumerate() {
+            if ch == key && previous != '\\' {
+                if let Some(start) = opening.take() {
+                    if start <= b.col && b.col <= col {
+                        found = Some((base + start, base + col));
+                        break;
+                    }
+                } else {
+                    opening = Some(col);
+                }
+            }
+            previous = ch;
+        }
+        found?
     } else {
         return None;
     };

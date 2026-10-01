@@ -43,13 +43,7 @@ impl Editor {
             self.reset_command();
             return;
         };
-        let word: String = self
-            .buffer
-            .body()
-            .chars()
-            .skip(start)
-            .take(end - start)
-            .collect();
+        let word: String = self.buffer.chars_forward(start).take(end - start).collect();
         if !word.chars().all(|c| c.is_alphanumeric() || c == '_') {
             self.message = "No keyword under cursor".into();
             self.reset_command();

@@ -60,10 +60,13 @@ jobs:
         shell: bash
         run: make
 
-      - name: Unit tests on Unix
+      - name: Unit tests and performance probes on Unix
         if: runner.os != 'Windows'
         shell: bash
-        run: make test
+        run: |
+          make test
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo test --release --locked -- --ignored --nocapture
 
       - name: Installation and terminal tests on Unix
         if: runner.os != 'Windows'
@@ -77,11 +80,14 @@ jobs:
           make
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Unit tests on Windows
+      - name: Unit tests and performance probes on Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           make test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+          cargo test --release --locked -- --ignored --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Installation and terminal tests on Windows

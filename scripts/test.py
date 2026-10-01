@@ -6,6 +6,9 @@ import sys
 import tempfile
 import time
 
+VERSION = "fvim " + next(line.split('"')[1] for line in Path("Cargo.toml").read_text().splitlines()
+                         if line.startswith("version = "))
+
 
 def run(*args, env=None, cwd=None):
     return subprocess.check_output(args, env=env, cwd=cwd, text=True, timeout=120).strip()
@@ -36,13 +39,13 @@ def install_test(root):
         run("make", "install", env=env)
         assert init.read_text(encoding="utf-8") == "-- preserved\n"
         binary = prefix / "bin" / ("fvim.exe" if os.name == "nt" else "fvim")
-        assert run(str(binary), "--version") == "fvim 0.2.0"
+        assert run(str(binary), "--version") == VERSION
         if registry:
             path, _ = winreg.QueryValueEx(registry, "Path")
             parts = [p.rstrip("\\").casefold() for p in path.split(";")]
             assert parts.count(str(binary.parent.resolve()).rstrip("\\").casefold()) == 1, f"Expected {binary.parent}; fvim entries: {[p for p in parts if 'fvim' in p]}"
             fresh = dict(env, PATH=path + ";" + os.environ["PATH"])
-            assert run("cmd.exe", "/d", "/c", "fvim --version", env=fresh) == "fvim 0.2.0"
+            assert run("cmd.exe", "/d", "/c", "fvim --version", env=fresh) == VERSION
         else:
             assert Path(run("sh", "-c", '. "$HOME/.profile"; command -v fvim', env=env)).resolve() == binary.resolve()
             for name in (".profile", ".bashrc", ".zshrc"):
@@ -81,7 +84,7 @@ def sudo_install_test(root):
         init = config / "init.lua"
         assert init.is_file()
         assert init.stat().st_uid == os.getuid(), "Sudo installation must create user-owned config."
-        assert run(str(prefix / "bin/fvim"), "--version") == "fvim 0.2.0"
+        assert run(str(prefix / "bin/fvim"), "--version") == VERSION
         run("sudo", "-n", "chmod", "700", str(prefix / "bin"))
         # Exercise permission escalation only inside this test's staging prefix.
         cleanup = root / "sudo clean workspace"
@@ -201,6 +204,9 @@ def expect_file(path, expected):
 
 
 def exercise_editor(send, expect, clear, path):
+    expect(b"NORMAL")
+    clear()
+    send(b"\x0c")  # Ctrl-L must repaint even an unchanged frame.
     expect(b"NORMAL")
     clear()
     send(b"ihello\rworld\x13")

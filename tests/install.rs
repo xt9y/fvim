@@ -59,7 +59,7 @@ fn installation_is_repeatable_and_preserves_config() {
     assert!(result.status.success());
     assert_eq!(
         String::from_utf8(result.stdout).unwrap().trim(),
-        "fvim 0.2.0"
+        format!("fvim {}", env!("CARGO_PKG_VERSION"))
     );
 }
 

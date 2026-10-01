@@ -114,30 +114,43 @@ impl Search {
         forward: bool,
         count: usize,
     ) -> Option<usize> {
-        let positions: Vec<_> = self
-            .regex
-            .find_iter(body)
-            .map(|m| body[..m.start()].chars().count())
-            .collect();
-        if positions.is_empty() {
+        let count = count.max(1);
+        let (mut total, mut byte, mut chars) = (0, 0, 0);
+        let (mut first_after, mut last_before) = (None, None);
+        for m in self.regex.find_iter(body) {
+            // Match byte offsets are sorted: decode each intervening span once.
+            chars += body[byte..m.start()].chars().count();
+            byte = m.start();
+            if chars > pos && forward {
+                let first = *first_after.get_or_insert(total);
+                if total - first == count - 1 {
+                    return Some(chars);
+                }
+            }
+            if chars < pos {
+                last_before = Some(total);
+            }
+            total += 1;
+        }
+        if total == 0 {
             return None;
         }
         let first = if forward {
-            positions.iter().position(|&n| n > pos).unwrap_or(0)
+            first_after.unwrap_or(0)
         } else {
-            positions
-                .iter()
-                .rposition(|&n| n < pos)
-                .unwrap_or(positions.len() - 1)
+            last_before.unwrap_or(total - 1)
         };
-        let n = (count - 1) % positions.len();
-        Some(
-            positions[if forward {
-                (first + n) % positions.len()
-            } else {
-                (first + positions.len() - n) % positions.len()
-            }],
-        )
+        let n = (count - 1) % total;
+        let index = if forward {
+            (first + n) % total
+        } else {
+            (first + total - n) % total
+        };
+        // A wrapping/backward search needs at most one second pass, no match list.
+        self.regex
+            .find_iter(body)
+            .nth(index)
+            .map(|m| body[..m.start()].chars().count())
     }
 }
 
@@ -374,6 +387,32 @@ fn expand(replacement: &str, caps: &Captures<'_>) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counted_searches_wrap_and_preserve_unicode_and_zero_width_offsets() {
+        let s = Search::new("x".into(), true).unwrap();
+        let text = "éx\nx🙂x";
+        for (pos, forward, count, expected) in [
+            (1, true, 1, 3),
+            (5, true, 1, 1),
+            (3, true, 4, 5),
+            (3, false, 1, 1),
+            (0, false, 2, 3),
+            (5, false, 5, 1),
+        ] {
+            assert_eq!(s.destination(text, pos, forward, count), Some(expected));
+        }
+        let s = Search::new("^".into(), true).unwrap();
+        assert_eq!(s.destination(text, 0, true, 1), Some(3));
+        assert_eq!(s.destination(text, 0, false, 3), Some(3));
+        assert_eq!(s.destination("", 0, true, 10), Some(0));
+        assert_eq!(
+            Search::new("missing".into(), true)
+                .unwrap()
+                .destination(text, 0, true, 1),
+            None
+        );
+    }
 
     #[test]
     fn vim_brace_quantifiers_include_the_closing_brace() {
