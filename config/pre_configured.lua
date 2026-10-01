@@ -113,7 +113,6 @@ vim.diagnostic.config {
     update_in_insert=false, severity_sort=true, float={border='rounded',source='always'},
 }
 vim.filetype.add { extension={fx='hlsl',fxh='hlsl',usf='hlsl',ush='hlsl',json='json',md='markdown',sh='bash'} }
-vim.keymap.set('n','dd','diagnostics')
 vim.keymap.set('n','<leader>d','diagnostics')
 vim.keymap.set('n',']d','diagnostic_next')
 vim.keymap.set('n','[d','diagnostic_previous')

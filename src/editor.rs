@@ -73,6 +73,20 @@ pub struct CompletionMenu {
     pub selected: Option<usize>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SnippetStop {
+    pub index: usize,
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Clone, Debug)]
+struct SnippetSession {
+    stops: Vec<SnippetStop>,
+    current: usize,
+    pristine: bool,
+}
+
 pub struct Editor {
     pub terminal: Option<vt100::Screen>,
     pub semantic: Vec<crate::syntax::Span>,
@@ -109,6 +123,7 @@ pub struct Editor {
     insert_count: usize,
     inserted: String,
     block_insert: Option<(usize, usize, usize)>,
+    snippet: Option<SnippetSession>,
 }
 
 impl Editor {
@@ -149,6 +164,7 @@ impl Editor {
             insert_count: 1,
             inserted: String::new(),
             block_insert: None,
+            snippet: None,
         }
     }
 
@@ -254,7 +270,185 @@ impl Editor {
         }
     }
 
+    pub(crate) fn activate_snippet(&mut self, mut stops: Vec<SnippetStop>) {
+        stops.sort_by_key(|stop| (stop.index == 0, stop.index, stop.start));
+        stops.dedup_by_key(|stop| stop.index);
+        let Some(first) = stops.first().cloned() else {
+            self.snippet = None;
+            return;
+        };
+        self.buffer.set_offset(first.start);
+        if first.index == 0 {
+            self.snippet = None;
+            return;
+        }
+        self.snippet = Some(SnippetSession {
+            pristine: first.start < first.end,
+            stops,
+            current: 0,
+        });
+    }
+
+    pub(crate) fn snippet_active(&self) -> bool {
+        self.snippet.is_some()
+    }
+
+    fn active_snippet_stop(&self) -> Option<SnippetStop> {
+        let snippet = self.snippet.as_ref()?;
+        snippet.stops.get(snippet.current).cloned()
+    }
+
+    fn shifted(value: usize, delta: isize) -> usize {
+        if delta >= 0 {
+            value.saturating_add(delta as usize)
+        } else {
+            value.saturating_sub(delta.unsigned_abs())
+        }
+    }
+
+    fn snippet_adjust(&mut self, start: usize, removed: usize, inserted: usize) {
+        let Some(snippet) = self.snippet.as_mut() else {
+            return;
+        };
+        let current = snippet.current;
+        let old_end = start.saturating_add(removed);
+        let delta = inserted as isize - removed as isize;
+        for (i, stop) in snippet.stops.iter_mut().enumerate() {
+            if i == current {
+                if start <= stop.end {
+                    stop.end = Self::shifted(stop.end, delta);
+                    if start < stop.start {
+                        stop.start = Self::shifted(stop.start, delta);
+                    }
+                }
+            } else if stop.start >= old_end {
+                stop.start = Self::shifted(stop.start, delta);
+                stop.end = Self::shifted(stop.end, delta);
+            } else if stop.end >= old_end {
+                stop.end = Self::shifted(stop.end, delta);
+            }
+        }
+    }
+
+    fn snippet_clear_current(&mut self) {
+        if !self
+            .snippet
+            .as_ref()
+            .is_some_and(|snippet| snippet.pristine)
+        {
+            return;
+        }
+        let Some(stop) = self.active_snippet_stop() else {
+            return;
+        };
+        self.buffer.begin_change();
+        self.buffer.replace(stop.start, stop.end, "");
+        self.buffer.set_offset(stop.start);
+        self.snippet_adjust(stop.start, stop.end - stop.start, 0);
+        if let Some(snippet) = self.snippet.as_mut() {
+            snippet.pristine = false;
+        }
+    }
+
+    fn snippet_move(&mut self, reverse: bool) {
+        let next = {
+            let Some(snippet) = self.snippet.as_mut() else {
+                return;
+            };
+            if reverse {
+                snippet.current = snippet.current.saturating_sub(1);
+                Some(snippet.stops[snippet.current].clone())
+            } else if snippet.current + 1 < snippet.stops.len() {
+                snippet.current += 1;
+                Some(snippet.stops[snippet.current].clone())
+            } else {
+                None
+            }
+        };
+        let Some(stop) = next else {
+            self.snippet = None;
+            return;
+        };
+        self.buffer.set_offset(stop.start);
+        if stop.index == 0 {
+            self.snippet = None;
+        } else if let Some(snippet) = self.snippet.as_mut() {
+            snippet.pristine = stop.start < stop.end;
+        }
+    }
+
+    fn buffer_length(&self) -> usize {
+        self.buffer
+            .lines
+            .iter()
+            .map(|line| line.chars().count())
+            .sum::<usize>()
+            + self.buffer.lines.len().saturating_sub(1)
+    }
+
+    fn snippet_edit_key(&mut self, code: KeyCode) -> bool {
+        if self.snippet.is_none() {
+            return false;
+        }
+        match code {
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.snippet_move(code == KeyCode::BackTab);
+                true
+            }
+            KeyCode::Char(_) | KeyCode::Enter | KeyCode::Backspace | KeyCode::Delete => {
+                if self
+                    .snippet
+                    .as_ref()
+                    .is_some_and(|snippet| snippet.pristine)
+                {
+                    self.snippet_clear_current();
+                    if matches!(code, KeyCode::Backspace | KeyCode::Delete) {
+                        return true;
+                    }
+                }
+                let Some(stop) = self.active_snippet_stop() else {
+                    return false;
+                };
+                let cursor = self.buffer.offset();
+                if (code == KeyCode::Backspace && cursor <= stop.start)
+                    || (code == KeyCode::Delete && cursor >= stop.end)
+                {
+                    self.snippet = None;
+                    return false;
+                }
+                let old_len = self.buffer_length();
+                let old_cursor = cursor;
+                self.insert_key(code);
+                let new_len = self.buffer_length();
+                let new_cursor = self.buffer.offset();
+                if new_len >= old_len {
+                    self.snippet_adjust(old_cursor, 0, new_len - old_len);
+                } else {
+                    self.snippet_adjust(old_cursor.min(new_cursor), old_len - new_len, 0);
+                }
+                true
+            }
+            _ => {
+                self.snippet = None;
+                false
+            }
+        }
+    }
+
     pub fn selected(&self, row: usize, col: usize) -> bool {
+        if self.mode == Mode::Insert
+            && self
+                .snippet
+                .as_ref()
+                .is_some_and(|snippet| snippet.pristine)
+        {
+            if let Some(stop) = self.active_snippet_stop() {
+                let offset = self.buffer.offset_at(row, col);
+                if stop.start <= offset && offset < stop.end {
+                    return true;
+                }
+            }
+        }
         match self.mode {
             Mode::Visual(Visual::Line) => (self.anchor.0.min(self.buffer.row)
                 ..=self.anchor.0.max(self.buffer.row))
@@ -399,7 +593,9 @@ impl Editor {
                 _ => {}
             }
         } else if self.mode == Mode::Insert {
-            self.insert_key(key.code);
+            if !self.snippet_edit_key(key.code) {
+                self.insert_key(key.code);
+            }
         } else {
             self.normal_key(key.code);
         }
@@ -434,6 +630,14 @@ impl Editor {
         }
         if !self.replaying {
             self.recording.push(Input::Paste(text.to_owned()));
+        }
+        if self.mode == Mode::Insert && self.snippet.is_some() {
+            self.snippet_clear_current();
+            let start = self.buffer.offset();
+            self.buffer.insert(text);
+            self.inserted.push_str(text);
+            self.snippet_adjust(start, 0, text.chars().count());
+            return;
         }
         self.buffer.insert(text);
         self.inserted.push_str(text);
@@ -475,6 +679,7 @@ impl Editor {
         self.insert_count = 1;
         self.inserted.clear();
         self.goal = None;
+        self.snippet = None;
     }
 
     fn insert_key(&mut self, code: KeyCode) {

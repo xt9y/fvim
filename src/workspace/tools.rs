@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    editor::{Completion, CompletionMenu},
+    editor::{Completion, CompletionMenu, SnippetStop},
     tooling::{self, Event},
 };
 use serde_json::Value;
@@ -335,6 +335,10 @@ impl Workspace {
         redraw
     }
     pub(super) fn completion_key(&mut self, key: KeyEvent) -> bool {
+        if self.editor().snippet_active() && matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+            self.editor_mut().completion = None;
+            return false;
+        }
         if self.editor().completion.is_none() {
             return false;
         }
@@ -375,33 +379,215 @@ impl Workspace {
         if accept {
             let menu = self.editor_mut().completion.take().unwrap();
             let item = &menu.items[menu.selected.unwrap_or(0)];
-            let b = &mut self.editor_mut().buffer;
-            apply_completion(b, item);
+            apply_completion(self.editor_mut(), item);
             return true;
         }
         self.editor_mut().completion = None;
         false
     }
 }
-fn apply_completion(b: &mut Buffer, item: &Completion) {
-    let main_start = b.offset_at(item.start.0, item.start.1);
-    let main_end = b.offset_at(item.end.0, item.end.1);
-    let mut cursor = main_start + item.text.chars().count();
-    let mut edits = vec![(main_start, main_end, item.text.as_str())];
+fn shift_offset(value: usize, delta: isize) -> usize {
+    if delta >= 0 {
+        value.saturating_add(delta as usize)
+    } else {
+        value.saturating_sub(delta.unsigned_abs())
+    }
+}
+
+fn apply_completion(e: &mut Editor, item: &Completion) {
+    let main_start = e.buffer.offset_at(item.start.0, item.start.1);
+    let main_end = e.buffer.offset_at(item.end.0, item.end.1);
+    let (text, mut stops) = parse_snippet(&item.text);
+    let mut shift = 0isize;
+    let mut edits = vec![(main_start, main_end, text.clone())];
     for edit in &item.additional {
-        let start = b.offset_at(edit.start.0, edit.start.1);
-        let end = b.offset_at(edit.end.0, edit.end.1);
+        let start = e.buffer.offset_at(edit.start.0, edit.start.1);
+        let end = e.buffer.offset_at(edit.end.0, edit.end.1);
         if end <= main_start {
-            cursor = cursor + edit.text.chars().count() - (end - start);
+            shift += edit.text.chars().count() as isize - (end - start) as isize;
         }
-        edits.push((start, end, &edit.text));
+        edits.push((start, end, edit.text.clone()));
     }
     edits.sort_by_key(|edit| std::cmp::Reverse(edit.0));
-    b.begin_change();
-    for (start, end, text) in edits {
-        b.replace(start, end, text);
+    e.buffer.begin_change();
+    for (start, end, replacement) in edits {
+        e.buffer.replace(start, end, &replacement);
     }
-    b.set_offset(cursor);
+    let applied_start = shift_offset(main_start, shift);
+    let end = applied_start + text.chars().count();
+    for stop in &mut stops {
+        stop.start += applied_start;
+        stop.end += applied_start;
+    }
+    if stops.is_empty() {
+        e.buffer.set_offset(end);
+    } else {
+        e.activate_snippet(stops);
+    }
+}
+
+fn matching_brace(chars: &[char], mut index: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    while index < chars.len() {
+        if chars[index] == '\\' {
+            index += 2;
+            continue;
+        }
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
+            depth += 1;
+            index += 2;
+            continue;
+        }
+        if chars[index] == '}' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn parse_snippet_chars(chars: &[char]) -> (String, Vec<SnippetStop>) {
+    let mut text = String::new();
+    let mut stops = vec![];
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] == '\\' && i + 1 < chars.len() {
+            text.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        if chars[i] != '$' {
+            text.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        if chars.get(i + 1).is_some_and(|ch| ch.is_ascii_digit()) {
+            let mut j = i + 1;
+            while chars.get(j).is_some_and(|ch| ch.is_ascii_digit()) {
+                j += 1;
+            }
+            let index = chars[i + 1..j]
+                .iter()
+                .collect::<String>()
+                .parse()
+                .unwrap_or(0);
+            let at = text.chars().count();
+            stops.push(SnippetStop {
+                index,
+                start: at,
+                end: at,
+            });
+            i = j;
+            continue;
+        }
+        if chars.get(i + 1) != Some(&'{') {
+            text.push('$');
+            i += 1;
+            continue;
+        }
+        let Some(close) = matching_brace(chars, i + 2) else {
+            text.push('$');
+            i += 1;
+            continue;
+        };
+        let mut j = i + 2;
+        let digit_start = j;
+        while chars.get(j).is_some_and(|ch| ch.is_ascii_digit()) {
+            j += 1;
+        }
+        if j == digit_start {
+            let inner = &chars[i + 2..close];
+            if let Some(colon) = inner.iter().position(|ch| *ch == ':') {
+                let start = text.chars().count();
+                let (default, mut nested) = parse_snippet_chars(&inner[colon + 1..]);
+                text.push_str(&default);
+                for stop in &mut nested {
+                    stop.start += start;
+                    stop.end += start;
+                }
+                stops.extend(nested);
+            } else {
+                text.extend(inner.iter());
+            }
+            i = close + 1;
+            continue;
+        }
+        let index = chars[digit_start..j]
+            .iter()
+            .collect::<String>()
+            .parse()
+            .unwrap_or(0);
+        let start = text.chars().count();
+        match chars.get(j) {
+            Some('}') => {
+                stops.push(SnippetStop {
+                    index,
+                    start,
+                    end: start,
+                });
+                i = j + 1;
+            }
+            Some(':') => {
+                let (default, mut nested) = parse_snippet_chars(&chars[j + 1..close]);
+                text.push_str(&default);
+                let end = text.chars().count();
+                stops.push(SnippetStop { index, start, end });
+                for stop in &mut nested {
+                    stop.start += start;
+                    stop.end += start;
+                }
+                stops.extend(nested);
+                i = close + 1;
+            }
+            Some('|') => {
+                let mut choice = String::new();
+                let mut k = j + 1;
+                while k < close {
+                    if chars[k] == '\\' && k + 1 < close {
+                        choice.push(chars[k + 1]);
+                        k += 2;
+                        continue;
+                    }
+                    if chars[k] == ',' || (chars[k] == '|' && k + 1 == close) {
+                        break;
+                    }
+                    choice.push(chars[k]);
+                    k += 1;
+                }
+                text.push_str(&choice);
+                stops.push(SnippetStop {
+                    index,
+                    start,
+                    end: text.chars().count(),
+                });
+                i = close + 1;
+            }
+            _ => {
+                text.push('$');
+                i += 1;
+            }
+        }
+    }
+    (text, stops)
+}
+
+fn parse_snippet(source: &str) -> (String, Vec<SnippetStop>) {
+    let chars: Vec<char> = source.chars().collect();
+    let (text, mut stops) = parse_snippet_chars(&chars);
+    if !stops.iter().any(|stop| stop.index == 0) {
+        let end = text.chars().count();
+        stops.push(SnippetStop {
+            index: 0,
+            start: end,
+            end,
+        });
+    }
+    stops.sort_by_key(|stop| (stop.index == 0, stop.index, stop.start));
+    stops.dedup_by_key(|stop| stop.index);
+    (text, stops)
 }
 fn position(e: &Editor, p: &Value) -> Option<(usize, usize)> {
     let row = p["line"].as_u64()? as usize;
@@ -423,15 +609,26 @@ fn completion_items(e: &Editor, value: &Value, row: usize, col: usize) -> Vec<Co
     items
         .iter()
         .filter_map(|item| {
-            if item["insertTextFormat"] == 2 {
-                return None;
-            }
-            let label = item["label"].as_str()?.to_owned();
-            let text = item["textEdit"]["newText"]
+            let insert_label = item["label"].as_str()?.to_owned();
+            let detail = item["labelDetails"]["detail"]
+                .as_str()
+                .or_else(|| item["detail"].as_str())
+                .filter(|detail| !detail.trim().is_empty() && *detail != insert_label.as_str());
+            let label = detail.map_or_else(
+                || insert_label.clone(),
+                |detail| format!("{insert_label}  {detail}"),
+            );
+            let mut text = item["textEdit"]["newText"]
                 .as_str()
                 .or_else(|| item["insertText"].as_str())
-                .unwrap_or(&label)
+                .unwrap_or(&insert_label)
                 .to_owned();
+            // CompletionItem.insertTextFormat defaults to PlainText. Escape the
+            // two characters interpreted by our internal snippet grammar so a
+            // plain completion is inserted byte-for-byte instead of expanded.
+            if item["insertTextFormat"].as_u64() != Some(2) {
+                text = text.replace('\\', "\\\\").replace('$', "\\$");
+            }
             let range = &item["textEdit"]["range"];
             let (start, end) = if range.is_object() {
                 (position(e, &range["start"])?, position(e, &range["end"])?)
@@ -522,11 +719,61 @@ mod tests {
             1,
             3,
         );
-        apply_completion(&mut e.buffer, &items[0]);
+        apply_completion(&mut e, &items[0]);
         assert_eq!(e.buffer.text(), "#include <vector>\n// heading\nvector");
         assert_eq!((e.buffer.row, e.buffer.col), (2, 6));
         e.buffer.end_change();
         e.buffer.undo();
         assert_eq!(e.buffer.text(), "// heading\nvec");
+    }
+
+    #[test]
+    fn snippet_parser_handles_defaults_tabstops_choices_and_final_cursor() {
+        let (text, stops) = parse_snippet(r#"${1:name}($2, ${3|one\,two,three|})$0"#);
+        assert_eq!(text, "name(, one,two)");
+        assert_eq!(
+            stops,
+            vec![
+                SnippetStop {
+                    index: 1,
+                    start: 0,
+                    end: 4
+                },
+                SnippetStop {
+                    index: 2,
+                    start: 5,
+                    end: 5
+                },
+                SnippetStop {
+                    index: 3,
+                    start: 7,
+                    end: 14
+                },
+                SnippetStop {
+                    index: 0,
+                    start: 15,
+                    end: 15
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn plain_completion_preserves_dollar_and_backslash_text() {
+        let mut e = Editor::new(Buffer::from_text("x"));
+        e.buffer.col = 1;
+        let items = completion_items(
+            &e,
+            &json!([{
+                "label":"literal",
+                "insertTextFormat":1,
+                "insertText":"price$0\\path"
+            }]),
+            0,
+            1,
+        );
+        apply_completion(&mut e, &items[0]);
+        assert_eq!(e.buffer.text(), "price$0\\path");
+        assert!(!e.snippet_active());
     }
 }
