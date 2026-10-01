@@ -44,15 +44,15 @@ impl Diagnostic {
     }
     pub fn label(&self) -> String {
         format!(
-            "{} {}:{}:{} [{}] {}",
+            "{} [{}] {}  {}:{}:{}",
             self.sign(),
+            self.source,
+            self.message,
             self.path
                 .as_ref()
                 .map_or("[Build]".into(), |p| p.display().to_string()),
             self.row + 1,
             self.col + 1,
-            self.source,
-            self.message
         )
     }
 }
@@ -150,6 +150,23 @@ pub fn build_command(root: &Path, settings: &Settings, args: &str) -> Result<Vec
     Ok(command)
 }
 
+#[cfg(any(windows, test))]
+fn inherited_cursor_output(pending: &mut String, text: &str) -> (String, bool) {
+    const QUERY: &str = "\x1b[6n";
+    pending.push_str(text);
+    if let Some(index) = pending.find(QUERY) {
+        pending.replace_range(index..index + QUERY.len(), "");
+        return (std::mem::take(pending), true);
+    }
+    let tail = (1..QUERY.len())
+        .rev()
+        .find(|&len| pending.ends_with(&QUERY[..len]))
+        .unwrap_or(0);
+    let keep = pending.split_off(pending.len() - tail);
+    let output = std::mem::replace(pending, keep);
+    (output, false)
+}
+
 pub enum BuildEvent {
     Output(String),
     Finished,
@@ -166,6 +183,10 @@ pub struct Build {
     pub text: String,
     readers: usize,
     exit: Option<String>,
+    #[cfg(windows)]
+    inherited_cursor: bool,
+    #[cfg(windows)]
+    cursor_pending: String,
 }
 impl Build {
     pub fn start(root: &Path, command: &[String], buffer: usize) -> Result<Self, String> {
@@ -239,6 +260,10 @@ impl Build {
             text: format!("$ {}\n", command.join(" ")),
             readers: 1,
             exit: None,
+            #[cfg(windows)]
+            inherited_cursor: true,
+            #[cfg(windows)]
+            cursor_pending: String::new(),
         })
     }
     pub fn poll(&mut self) -> (bool, bool) {
@@ -247,10 +272,32 @@ impl Build {
             changed = true;
             match event {
                 BuildEvent::Output(text) => {
+                    #[cfg(windows)]
+                    let text = if self.inherited_cursor {
+                        let (text, report) =
+                            inherited_cursor_output(&mut self.cursor_pending, &text);
+                        if report {
+                            // portable-pty asks for the starting cursor on Windows.
+                            // This is a fresh build terminal with its cursor at 1,1.
+                            let _ = self.input(b"\x1b[1;1R");
+                            self.inherited_cursor = false;
+                        }
+                        text
+                    } else {
+                        text
+                    };
                     self.output.push_str(&text);
                     self.text.push_str(&text);
                 }
-                BuildEvent::Finished => self.readers = self.readers.saturating_sub(1),
+                BuildEvent::Finished => {
+                    #[cfg(windows)]
+                    {
+                        self.output.push_str(&self.cursor_pending);
+                        self.text
+                            .push_str(&std::mem::take(&mut self.cursor_pending));
+                    }
+                    self.readers = self.readers.saturating_sub(1);
+                }
             }
         }
         if self.exit.is_none() {
@@ -331,6 +378,33 @@ impl Drop for Build {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn conpty_inherited_cursor_query_is_answered_even_across_output_chunks() {
+        let mut pending = String::new();
+        assert_eq!(
+            inherited_cursor_output(&mut pending, "before\x1b["),
+            ("before".into(), false)
+        );
+        assert_eq!(
+            inherited_cursor_output(&mut pending, "6nstartup"),
+            ("startup".into(), true)
+        );
+        assert!(pending.is_empty());
+    }
+    #[test]
+    fn diagnostic_messages_remain_visible_before_long_paths() {
+        let d = Diagnostic {
+            path: Some(PathBuf::from("long-directory/".repeat(20))),
+            row: 0,
+            col: 0,
+            end_row: 0,
+            end_col: 1,
+            severity: 1,
+            source: "lsp".into(),
+            message: "visible error".into(),
+        };
+        assert!(d.label().starts_with("E [lsp] visible error"));
+    }
     #[cfg(unix)]
     #[test]
     fn cancel_terminates_background_children_after_the_parent_exits() {
