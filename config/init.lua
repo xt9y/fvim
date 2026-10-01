@@ -1,0 +1,4 @@
+-- Personal overrides. pre_configured.lua is loaded first.
+-- vim.opt.scrolloff = 8
+-- vim.opt.relativenumber = false
+-- vim.api.nvim_set_hl(0, 'StatusLine', { fg = '#ebdbb2', bg = '#282828' })

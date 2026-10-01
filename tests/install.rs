@@ -45,11 +45,18 @@ fn installation_is_repeatable_and_preserves_config() {
             String::from_utf8_lossy(&result.stderr)
         );
         let init = config.join("init.lua");
+        let defaults = config.join("pre_configured.lua");
         if pass == 0 {
             assert!(init.is_file());
+            assert!(defaults.is_file());
             fs::write(&init, "-- keep my config\n").unwrap();
+            fs::write(&defaults, "-- keep my defaults\n").unwrap();
         } else {
             assert_eq!(fs::read_to_string(init).unwrap(), "-- keep my config\n");
+            assert_eq!(
+                fs::read_to_string(defaults).unwrap(),
+                "-- keep my defaults\n"
+            );
         }
     }
     let executable = prefix
@@ -60,6 +67,56 @@ fn installation_is_repeatable_and_preserves_config() {
     assert_eq!(
         String::from_utf8(result.stdout).unwrap().trim(),
         format!("fvim {}", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
+fn lua_configuration_executes_defaults_before_user_overrides() {
+    let sandbox = Sandbox::new();
+    let binary = env!("CARGO_BIN_EXE_fvim");
+    let output = Command::new(binary)
+        .arg("--init-config")
+        .env("FVIM_CONFIG_DIR", &sandbox.0)
+        .env("FVIM_NO_PATH", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let defaults = sandbox.0.join("pre_configured.lua");
+    if defaults.is_file() {
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&defaults)
+            .unwrap()
+            .write_all(b"\nvim.opt.tabstop = 3\nbase = vim.opt.tabstop\n")
+            .unwrap();
+    }
+    fs::write(
+        sandbox.0.join("init.lua"),
+        "assert(base == 3); vim.opt.tabstop = base + 2; assert(vim.o.tabstop == 5)",
+    )
+    .unwrap();
+    let result = Command::new(binary)
+        .arg("--check-config")
+        .env("FVIM_CONFIG_DIR", &sandbox.0)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    fs::write(sandbox.0.join("init.lua"), "vim.opt.tabstop = 0").unwrap();
+    let result = Command::new(binary)
+        .arg("--check-config")
+        .env("FVIM_CONFIG_DIR", &sandbox.0)
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        error.contains("init.lua") && error.contains("tabstop"),
+        "{error}"
     );
 }
 

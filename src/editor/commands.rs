@@ -192,7 +192,12 @@ impl Editor {
             }
             return Ok(false);
         }
-        if rest.starts_with('s') && !rest.starts_with("save") {
+        if rest.starts_with('s')
+            && rest
+                .chars()
+                .nth(1)
+                .is_none_or(|ch| !ch.is_ascii_alphabetic())
+        {
             self.substitute(rest, start, end)?;
             return Ok(false);
         }
@@ -202,6 +207,12 @@ impl Editor {
         let force = name.ends_with('!');
         let name = name.trim_end_matches('!');
         match name {
+            "set" | "lua" | "source" | "luafile" | "colorscheme" => {
+                if has_range {
+                    return Err("Invalid range for configuration command".into());
+                }
+                self.config_command = Some(rest.into());
+            }
             "q" | "quit" => {
                 if self.buffer.dirty() && !force {
                     return Err("Unsaved changes. Use :q! to discard them.".into());

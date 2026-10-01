@@ -35,9 +35,16 @@ def install_test(root):
         print(run("make", "install", env=env))
         init = config / "init.lua"
         assert init.is_file()
-        init.write_text("-- preserved\n", encoding="utf-8")
+        defaults = config / "pre_configured.lua"
+        assert defaults.is_file()
+        shipped = defaults.read_text(encoding="utf-8") + "\n-- preserved defaults\n"
+        defaults.write_text(shipped, encoding="utf-8")
+        personal = "-- preserved\nvim.opt.tabstop = 3\n"
+        init.write_text(personal, encoding="utf-8")
         run("make", "install", env=env)
-        assert init.read_text(encoding="utf-8") == "-- preserved\n"
+        assert init.read_text(encoding="utf-8") == personal
+        assert defaults.read_text(encoding="utf-8") == shipped
+        assert run(str(prefix / "bin" / ("fvim.exe" if os.name == "nt" else "fvim")), "--check-config", env=env) == "Configuration OK."
         binary = prefix / "bin" / ("fvim.exe" if os.name == "nt" else "fvim")
         assert run(str(binary), "--version") == VERSION
         if registry:
@@ -204,23 +211,42 @@ def expect_file(path, expected):
 
 
 def exercise_editor(send, expect, clear, path):
-    expect(b"NORMAL")
+    expect(b"edited.txt")
     clear()
     send(b"\x0c")  # Ctrl-L must repaint even an unchanged frame.
-    expect(b"NORMAL")
+    expect(b"edited.txt")
+    clear()
+    send(b"i\tX\x13")
+    expect(b"Saved.")
+    expect_file(path, b"   X")  # init.lua overrides the shipped tabstop=4.
+    clear()
+    send(b"\x1b")
+    expect(b"\x1b[2 q")  # Adjacent ESC+character is an Alt key sequence in a terminal.
+    clear()
+    send(b"gg0dd:set ts=5 sw=2 nosmartindent\r")
+    expect(b"Configuration updated.")
+    clear()
+    send(b":lua vim.opt.tabstop=0\r")
+    expect(b"tabstop must be between")
+    clear()
+    send(b":lua assert(vim.opt.tabstop==5); vim.opt.number=false\r")
+    expect(b"Configuration updated.")
+    clear()
+    send(b":source\r")
+    expect(b"Configuration updated.")
     clear()
     send(b"ihello\rworld\x13")
     expect(b"Saved.")
     expect_file(path, b"hello\nworld")
     clear()
     send(b"\x1b")
-    expect(b"NORMAL")
+    expect(b"\x1b[2 q")
     clear()
     send(b"gg0cwHELLO")
     expect(b"INSERT")
     clear()
     send(b"\x1b")
-    expect(b"NORMAL")
+    expect(b"\x1b[2 q")
     clear()
     send(b":%s/world/EARTH/gc\r")
     expect(b"replace with EARTH")
@@ -391,7 +417,7 @@ def windows_terminal_test(binary, root):
                 k.CloseHandle(value)
 
 
-def terminal_test(binary, root):
+def _terminal_test(binary, root):
     if os.name == "nt":
         windows_terminal_test(binary, root)
         return
@@ -457,6 +483,18 @@ def terminal_test(binary, root):
             process.stdout.close()
         else:
             os.close(master)
+
+
+def terminal_test(binary, root):
+    previous = os.environ.get("FVIM_CONFIG_DIR")
+    os.environ["FVIM_CONFIG_DIR"] = str(root / "configuration")
+    try:
+        _terminal_test(binary, root)
+    finally:
+        if previous is None:
+            os.environ.pop("FVIM_CONFIG_DIR", None)
+        else:
+            os.environ["FVIM_CONFIG_DIR"] = previous
 
 
 assert len(list(Path(".github/workflows").glob("*"))) == 1, "Keep exactly one workflow."

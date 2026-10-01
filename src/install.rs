@@ -4,9 +4,6 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const DEFAULT_CONFIG: &str =
-    "-- fvim configuration\n-- Lua execution and Neovim settings arrive in a later stage.\n";
-
 pub fn config_dir() -> io::Result<PathBuf> {
     if let Some(path) = env::var_os("FVIM_CONFIG_DIR") {
         return Ok(PathBuf::from(path));
@@ -25,14 +22,19 @@ pub fn config_dir() -> io::Result<PathBuf> {
 pub fn init_config() -> io::Result<()> {
     let dir = config_dir()?;
     fs::create_dir_all(&dir)?;
-    match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(dir.join("init.lua"))
-    {
-        Ok(mut file) => file.write_all(DEFAULT_CONFIG.as_bytes())?,
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(e),
+    for (name, contents) in [
+        ("pre_configured.lua", crate::config::DEFAULTS),
+        ("init.lua", crate::config::INIT),
+    ] {
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(name))
+        {
+            Ok(mut file) => file.write_all(contents.as_bytes())?,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
     }
     if env::var_os("FVIM_NO_PATH").is_none() {
         if let Some(bin) = env::var_os("FVIM_INSTALL_BIN") {

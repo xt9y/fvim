@@ -54,6 +54,8 @@ pub struct Prompt {
 }
 
 pub struct Editor {
+    pub settings: crate::config::Settings,
+    pub config_command: Option<String>,
     pub buffer: Buffer,
     pub mode: Mode,
     pub message: String,
@@ -83,6 +85,8 @@ pub struct Editor {
 impl Editor {
     pub fn new(buffer: Buffer) -> Self {
         Self {
+            settings: crate::config::Settings::default(),
+            config_command: None,
             buffer,
             mode: Mode::Normal,
             message: String::new(),
@@ -115,8 +119,8 @@ impl Editor {
             Mode::Normal => "NORMAL",
             Mode::Insert => "INSERT",
             Mode::Visual(Visual::Character) => "VISUAL",
-            Mode::Visual(Visual::Line) => "V-LINE",
-            Mode::Visual(Visual::Block) => "V-BLOCK",
+            Mode::Visual(Visual::Line) => "VISUAL LINE",
+            Mode::Visual(Visual::Block) => "VISUAL BLOCK",
         }
     }
 
@@ -358,12 +362,27 @@ impl Editor {
                 self.inserted.push(ch);
             }
             KeyCode::Enter => {
-                self.buffer.insert("\n");
-                self.inserted.push('\n');
+                let prefix: String = self.buffer.lines[self.buffer.row]
+                    .chars()
+                    .take(self.buffer.col)
+                    .collect();
+                let text = format!("\n{}", self.smart_indent(&prefix, true));
+                self.buffer.insert(&text);
+                self.inserted.push_str(&text);
             }
             KeyCode::Tab => {
-                self.buffer.insert("\t");
-                self.inserted.push('\t');
+                let column = crate::renderer::display_column(
+                    &self.buffer.lines[self.buffer.row],
+                    self.buffer.col,
+                    self.settings.tabstop,
+                );
+                let text = if self.settings.expandtab {
+                    " ".repeat(self.settings.tabstop - column % self.settings.tabstop)
+                } else {
+                    "\t".into()
+                };
+                self.buffer.insert(&text);
+                self.inserted.push_str(&text);
             }
             KeyCode::Backspace => {
                 if self.buffer.col == 0 && self.buffer.row > 0 {
@@ -386,6 +405,40 @@ impl Editor {
                 self.inserted.clear();
             }
         }
+    }
+
+    fn shiftwidth(&self) -> usize {
+        if self.settings.shiftwidth == 0 {
+            self.settings.tabstop
+        } else {
+            self.settings.shiftwidth
+        }
+    }
+
+    fn indentation(&self, columns: usize) -> String {
+        if self.settings.expandtab {
+            " ".repeat(columns)
+        } else {
+            format!(
+                "{}{}",
+                "\t".repeat(columns / self.settings.tabstop),
+                " ".repeat(columns % self.settings.tabstop)
+            )
+        }
+    }
+
+    fn smart_indent(&self, line: &str, below: bool) -> String {
+        if !self.settings.smartindent {
+            return String::new();
+        }
+        let chars = line.chars().take_while(|&c| c == ' ' || c == '\t').count();
+        let columns = crate::renderer::display_column(line, chars, self.settings.tabstop)
+            + if below && line.trim_end().ends_with('{') {
+                self.shiftwidth()
+            } else {
+                0
+            };
+        self.indentation(columns)
     }
 
     fn arrow(&mut self, code: KeyCode) {
@@ -667,8 +720,11 @@ impl Editor {
             }
             'o' | 'O' => {
                 self.buffer.begin_change();
+                let indent = self.smart_indent(&self.buffer.lines[self.buffer.row], ch == 'o');
                 let row = self.buffer.row + usize::from(ch == 'o');
-                self.buffer.replace_lines(row, row, &[String::new()]);
+                let col = indent.chars().count();
+                self.buffer.replace_lines(row, row, &[indent]);
+                self.buffer.col = col;
                 self.enter_insert(count);
                 self.count = 0;
             }
@@ -899,16 +955,18 @@ impl Editor {
             let lines: Vec<_> = self.buffer.lines[start..end]
                 .iter()
                 .map(|line| {
-                    if op == '>' {
-                        format!("    {line}")
+                    let n = line.chars().take_while(|&c| c == ' ' || c == '\t').count();
+                    let columns = crate::renderer::display_column(line, n, self.settings.tabstop);
+                    let columns = if op == '>' {
+                        columns + self.shiftwidth()
                     } else {
-                        let n = if line.starts_with('\t') {
-                            1
-                        } else {
-                            line.chars().take(4).take_while(|&c| c == ' ').count()
-                        };
-                        line.chars().skip(n).collect()
-                    }
+                        columns.saturating_sub(self.shiftwidth())
+                    };
+                    format!(
+                        "{}{}",
+                        self.indentation(columns),
+                        line.chars().skip(n).collect::<String>()
+                    )
                 })
                 .collect();
             self.buffer.replace_lines(start, end, &lines);
@@ -1409,5 +1467,40 @@ mod tests {
         assert_eq!(e.mode, Mode::Normal);
         keys(&mut e, "i界é\x1b0x");
         assert_eq!(e.buffer.text(), "é");
+    }
+    #[test]
+    fn configured_tabs_and_indentation_apply_to_actual_edits() {
+        let mut e = editor("abc");
+        e.settings.tabstop = 8;
+        e.settings.shiftwidth = 2;
+        keys(&mut e, "A");
+        e.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(e.buffer.text(), "abc     ");
+        e.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        keys(&mut e, ">>");
+        assert_eq!(e.buffer.text(), "  abc     ");
+        keys(&mut e, "<<");
+        assert_eq!(e.buffer.text(), "abc     ");
+        e.settings.expandtab = false;
+        keys(&mut e, "A");
+        e.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(e.buffer.text(), "abc     \t");
+    }
+
+    #[test]
+    fn smartindent_handles_newlines_and_open_lines_as_one_undo_change() {
+        let mut e = editor("  if (x) {");
+        e.settings.shiftwidth = 2;
+        keys(&mut e, "A");
+        e.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(e.buffer.text(), "  if (x) {\n    ");
+        e.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        keys(&mut e, "u");
+        assert_eq!(e.buffer.text(), "  if (x) {");
+        keys(&mut e, "o");
+        assert_eq!(e.buffer.text(), "  if (x) {\n    ");
+        e.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        keys(&mut e, "uO");
+        assert_eq!(e.buffer.text(), "  \n  if (x) {");
     }
 }

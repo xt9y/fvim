@@ -1,6 +1,6 @@
 [package]
 name = "fvim"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 publish = false
 
@@ -8,6 +8,7 @@ publish = false
 crossterm = "=0.29.0"
 regex = { version = "=1.13.1", default-features = false, features = ["std", "perf", "unicode-perl", "unicode-case"] }
 unicode-width = "=0.2.2"
+mlua = { version = "=0.12.1", default-features = false, features = ["lua54", "vendored"] }
 
 [profile.release]
 opt-level = "s"

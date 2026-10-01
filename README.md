@@ -1,6 +1,6 @@
 # fvim
 
-A small terminal editor with a Rust frontend and backend. Stage 3 optimizes essential Vim editing, search and substitution. Lua execution, full Neovim built-in compatibility, settings, themes and plugins come later.
+A small terminal editor with a Rust frontend and backend. Version 0.4 adds embedded Lua configuration, Neovim-style layout and a native retrobox UI palette. Broader built-in features, syntax/language tooling and plugin compatibility are still in development.
 
 ```sh
 git clone --depth 1 https://github.com/xt9y/fvim.git
@@ -13,7 +13,25 @@ On Unix, `sudo make install` installs the executable in `/usr/local/bin` and cre
 
 Git, GNU make, network access, and a native linker/build toolchain must be available. `make` installs Rust through rustup when Cargo is missing. Windows requires Visual Studio C++ Build Tools; macOS requires Command Line Tools; Linux requires a C linker.
 
-Configuration is created at `%LOCALAPPDATA%\fvim\init.lua` on Windows and `$XDG_CONFIG_HOME/fvim/init.lua` (default `~/.config/fvim/init.lua`) elsewhere. It is reserved for the Lua configuration stage and is not executed yet.
+Configuration lives in `%LOCALAPPDATA%\fvim` on Windows and `$XDG_CONFIG_HOME/fvim` (default `~/.config/fvim`) elsewhere. `pre_configured.lua` supplies defaults and runs first; `init.lua` runs afterward and overrides them. Installation creates both files and preserves existing contents. The shipped defaults in `config/pre_configured.lua` are also embedded for startup when the installed defaults file is missing. Lua 5.4 is statically linked; no separate Lua installation is needed.
+
+```lua
+-- init.lua: override any of the settings in pre_configured.lua
+vim.opt.scrolloff = 8
+vim.opt.tabstop = 4
+vim.opt.shiftwidth = 2
+vim.opt.relativenumber = false
+vim.opt.background = 'light'
+vim.api.nvim_set_hl(0, 'StatusLine', { fg = '#3c3836', bg = '#bdae93' })
+```
+
+The UI provides number/sign gutters, scrolling margins, optional wrapping/word breaks, a full-width statusline and a separate command/message area. Tabs, indentation and `o`/`O` consume the configured editing options. `smartindent` currently copies leading indentation and adds one shift after an opening brace; parser-based indentation arrives with syntax tooling. Bracketed paste preserves its supplied whitespace.
+
+`:set option=value`, `:set option` and `:set nooption` change supported options; common abbreviations such as `ts`, `sw`, `nu`, `rnu`, `et`, `so`, `ls`, `ch` and `stl` work. `:lua code` executes Lua, `:source` reloads both config files, and `:source file` / `:luafile file` execute one Lua file. `:colorscheme retrobox` and `:colorscheme default` select shipped UI palettes; define additional palettes in `fvim.themes`. Changing `background` switches the current palette. `vim.api.nvim_set_hl(0, group, values)` supports RGB/indexed foreground/background, bold, italic, underline, reverse and highlight links. `termguicolors=false` selects indexed colors; terminal output honors `NO_COLOR`.
+
+`fvim.opt`, `vim.opt`, `vim.o` and `vim.bo` address the current supported options. This is a small compatibility API: unimplemented options produce errors, and existing Neovim plugin configs cannot run unchanged. Keymaps, filetypes, pickers, splits, comments, build commands, Tree-sitter, language servers, completion and diagnostics are subsequent increments. Statusline formatting currently supports `%f`, `%F`, `%t`, `%m`, `%M`, `%l`, `%c`, `%v`, `%L`, `%p`, `%P`, `%=` and `%%`. `signcolumn=auto` reserves no space until diagnostic signs are implemented.
+
+`fvim --check-config` validates configuration without opening a terminal; `fvim --config-path` prints the personal config path. Errors identify the Lua file/option. Failed runtime updates retain the previous effective options/highlights; Lua filesystem/process side effects are not rolled back. Existing defaults are preserved on upgrades: new shipped defaults can be reviewed in `config/pre_configured.lua` before replacing an edited installed copy.
 
 Run `fvim [file]`. It starts in Normal mode. Press `i` to insert and Escape to return to Normal mode. `:w` saves; `:q` quits; `:q!` discards changes. Ctrl-S saves and Ctrl-Q quits (twice to discard). UTF-8 files with uniform LF or CRLF line endings and missing final newlines are preserved. Mixed line endings are normalized to the detected format. Tabs, wide/combining text and file control characters are rendered safely.
 
