@@ -1,6 +1,6 @@
 [package]
 name = "fvim"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 publish = false
 
@@ -23,6 +23,7 @@ tree-sitter-hlsl = "=0.2.0"
 shell-words = "=1.1.1"
 libc = "=0.2.189"
 portable-pty = "=0.9.0"
+vt100 = "=0.16.2"
 
 [profile.release]
 opt-level = "s"

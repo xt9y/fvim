@@ -74,6 +74,8 @@ pub struct CompletionMenu {
 }
 
 pub struct Editor {
+    pub terminal: Option<vt100::Screen>,
+    pub semantic: Vec<crate::syntax::Span>,
     pub popup: Option<Vec<String>>,
     pub completion: Option<CompletionMenu>,
     pub title: Option<String>,
@@ -112,6 +114,8 @@ pub struct Editor {
 impl Editor {
     pub fn new(buffer: Buffer) -> Self {
         Self {
+            terminal: None,
+            semantic: vec![],
             popup: None,
             completion: None,
             title: None,
@@ -230,6 +234,9 @@ impl Editor {
     }
 
     pub fn mode_name(&self) -> &'static str {
+        if self.terminal.is_some() && self.mode == Mode::Insert {
+            return "TERMINAL";
+        }
         match self.mode {
             Mode::Normal => "NORMAL",
             Mode::Insert => "INSERT",

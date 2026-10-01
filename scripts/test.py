@@ -210,7 +210,7 @@ def expect_file(path, expected):
     raise AssertionError(f"Save did not produce {expected!r}; last file contents: {actual!r}")
 
 
-def exercise_editor(send, expect, clear, path):
+def exercise_editor(send, expect, clear, path, observed):
     expect(b"edited.txt")
     clear()
     send(b"\x0c")  # Ctrl-L must repaint even an unchanged frame.
@@ -356,6 +356,16 @@ def exercise_editor(send, expect, clear, path):
     clear()
     send(b":make --interactive\r")
     expect(b"INPUT_PROMPT: ")
+    assert b"\x1b[?1049l" not in observed(), "Build escaped the fvim terminal pane"
+    clear()
+    send(b"\x1c\x0e")
+    expect(b"Terminal Normal:")
+    clear()
+    send(b"\x17k:w\r")
+    expect(b"Saved.")
+    clear()
+    send(b"\x17ji")
+    expect(b"Terminal: Ctrl-")
     clear()
     send(b"terminal input\r")
     expect(b"INPUT_RECEIVED: terminal input")
@@ -492,7 +502,7 @@ def windows_terminal_test(binary, root):
             with condition:
                 transcript.clear()
 
-        exercise_editor(send, expect, clear, path)
+        exercise_editor(send, expect, clear, path, lambda: bytes(transcript))
         assert k.WaitForSingleObject(process.hProcess, 10000) == 0, "Editor did not exit."
         exit_code = w.DWORD()
         check(k.GetExitCodeProcess(process.hProcess, c.byref(exit_code)))
@@ -565,7 +575,7 @@ def _terminal_test(binary, root):
         raise AssertionError(f"Terminal did not emit {text!r}: {bytes(transcript)!r}")
 
     try:
-        exercise_editor(lambda data: os.write(input_fd, data), expect, transcript.clear, path)
+        exercise_editor(lambda data: os.write(input_fd, data), expect, transcript.clear, path, lambda: bytes(transcript))
         assert process.wait(timeout=10) == 0
         assert path.read_bytes() == b"HELLO\nEARTH"
         if sys.platform != "darwin":

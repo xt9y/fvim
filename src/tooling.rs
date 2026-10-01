@@ -11,6 +11,7 @@ use std::{
     process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc::{self, Receiver, Sender},
     thread,
+    time::{Duration, Instant, SystemTime},
 };
 
 pub fn uri(path: &Path) -> String {
@@ -72,6 +73,126 @@ pub fn utf16_col(line: &str, units: usize) -> usize {
 pub fn to_utf16(line: &str, col: usize) -> usize {
     line.chars().take(col).map(char::len_utf16).sum()
 }
+pub fn compilation_database(path: &Path, root: &Path, explicit: Option<&Path>) -> Option<PathBuf> {
+    if let Some(dir) = explicit {
+        let dir = if dir.is_absolute() {
+            dir.to_owned()
+        } else {
+            root.join(dir)
+        };
+        return Some(dir);
+    }
+    for dir in path.parent()?.ancestors() {
+        if dir.join("compile_commands.json").is_file() {
+            return Some(dir.to_owned());
+        }
+        if dir == root {
+            break;
+        }
+    }
+    let mut dirs: Vec<_> = ["build", ".build", "out", "target"]
+        .iter()
+        .map(|name| (root.join(name), 0))
+        .collect();
+    let mut visited = 0;
+    while !dirs.is_empty() && visited < 256 {
+        let (dir, depth) = dirs.remove(0);
+        visited += 1;
+        if dir.join("compile_commands.json").is_file() {
+            return Some(dir);
+        }
+        if depth < 2 {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                let mut children: Vec<_> = entries
+                    .flatten()
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                    .map(|entry| entry.path())
+                    .collect();
+                children.sort();
+                dirs.extend(
+                    children
+                        .into_iter()
+                        .take(256 - dirs.len().min(256))
+                        .map(|p| (p, depth + 1)),
+                );
+            }
+        }
+    }
+    None
+}
+fn semantic_spans(
+    text: &str,
+    result: &Value,
+    legend: &[String],
+    modifiers: &[String],
+) -> Vec<Span> {
+    let Some(data) = result["data"].as_array() else {
+        return vec![];
+    };
+    let lines: Vec<_> = text.split('\n').collect();
+    let mut spans = vec![];
+    let mut row = 0usize;
+    let mut units = 0usize;
+    for token in data.as_chunks::<5>().0 {
+        let values: Option<Vec<_>> = token.iter().map(Value::as_u64).collect();
+        let Some(values) = values else {
+            continue;
+        };
+        let Some(next_row) = row.checked_add(values[0] as usize) else {
+            continue;
+        };
+        row = next_row;
+        let Some(next_units) =
+            (if values[0] == 0 { units } else { 0 }).checked_add(values[1] as usize)
+        else {
+            continue;
+        };
+        units = next_units;
+        let Some(line) = lines.get(row) else {
+            continue;
+        };
+        let Some(end) = units
+            .checked_add(values[2] as usize)
+            .filter(|end| *end <= line.encode_utf16().count())
+        else {
+            continue;
+        };
+        let Some(kind) = legend.get(values[3] as usize) else {
+            continue;
+        };
+        let readonly = modifiers
+            .iter()
+            .position(|name| name == "readonly")
+            .is_some_and(|bit| bit < 64 && values[4] & (1u64 << bit) != 0);
+        let group = match kind.as_str() {
+            "namespace" | "type" | "class" | "enum" | "interface" | "struct" | "typeParameter" => {
+                "Type"
+            }
+            "function" | "method" => "Function",
+            "property" | "event" => "Property",
+            "enumMember" | "macro" => "Constant",
+            "variable" | "parameter" if readonly => "Constant",
+            "variable" | "parameter" => "Variable",
+            "keyword" | "modifier" | "operator" | "decorator" => "Keyword",
+            "comment" => "Comment",
+            "string" | "regexp" => "String",
+            "number" => "Number",
+            _ => continue,
+        };
+        let start = utf16_col(line, units);
+        let end = utf16_col(line, end);
+        if start < end {
+            spans.push(Span {
+                row,
+                start,
+                end,
+                group,
+            });
+        }
+    }
+    spans
+}
+
 fn write_rpc(out: &mut impl Write, value: &Value) -> io::Result<()> {
     let bytes = serde_json::to_vec(value)?;
     write!(out, "Content-Length: {}\r\n\r\n", bytes.len())?;
@@ -116,7 +237,25 @@ pub struct Document {
     pub filetype: String,
     pub cursor: Option<(usize, usize)>,
 }
+fn keep_latest(documents: &mut HashMap<String, Document>, document: Document) {
+    let key = uri(&document.path);
+    if documents
+        .get(&key)
+        .is_none_or(|old| old.version <= document.version)
+    {
+        documents.insert(key, document);
+    }
+}
+fn database_stamp(dir: &Option<PathBuf>) -> Option<(SystemTime, u64)> {
+    let metadata = std::fs::metadata(dir.as_ref()?.join("compile_commands.json")).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
+}
 pub enum Event {
+    Semantic {
+        path: PathBuf,
+        version: u64,
+        spans: Vec<Span>,
+    },
     Syntax {
         path: PathBuf,
         version: u64,
@@ -149,6 +288,7 @@ enum Input {
     },
     Saved(PathBuf),
     Settings(ToolSettings),
+    ProjectBuilt(PathBuf),
     Rpc(String, Value),
     Exit(String, String),
     Stop,
@@ -181,6 +321,9 @@ impl Tools {
             method: method.into(),
         });
     }
+    pub fn project_built(&self, root: PathBuf) {
+        let _ = self.sender.send(Input::ProjectBuilt(root));
+    }
     pub fn saved(&self, path: PathBuf) {
         let _ = self.sender.send(Input::Saved(path));
     }
@@ -207,6 +350,11 @@ struct Session {
     documents: HashMap<String, Document>,
     incremental: bool,
     pending_saves: Vec<String>,
+    signature: String,
+    database: Option<PathBuf>,
+    database_stamp: Option<(SystemTime, u64)>,
+    semantic_types: Vec<String>,
+    semantic_modifiers: Vec<String>,
     root: PathBuf,
     name: String,
     requests: HashMap<u64, (String, String, u64, usize, usize)>,
@@ -226,11 +374,21 @@ impl Session {
     }
     fn update(&mut self, d: Document) {
         let uri = uri(&d.path);
+        if self
+            .documents
+            .get(&uri)
+            .is_some_and(|old| old.version > d.version)
+        {
+            return;
+        }
         let old = self.documents.insert(uri.clone(), d.clone());
         if !self.ready {
             return;
         }
         if let Some(old) = old {
+            if old.version == d.version && old.text == d.text {
+                return;
+            }
             let change = if self.incremental {
                 let row = old.text.bytes().filter(|b| *b == b'\n').count();
                 let col = old
@@ -252,6 +410,11 @@ impl Session {
             self.notify("textDocument/didOpen",json!({"textDocument":{"uri":uri,"languageId":d.filetype,"version":d.version,"text":d.text}}));
         }
     }
+    fn semantic(&mut self, id: u64, path: &Path) {
+        if !self.semantic_types.is_empty() {
+            self.request(id, path, 0, 0, "textDocument/semanticTokens/full");
+        }
+    }
     fn request(&mut self, id: u64, path: &Path, row: usize, col: usize, method: &str) {
         let uri = uri(path);
         let Some(d) = self.documents.get(&uri) else {
@@ -264,6 +427,9 @@ impl Session {
         let units = to_utf16(d.text.lines().nth(row).unwrap_or(""), col);
         let mut params =
             json!({"textDocument":{"uri":uri},"position":{"line":row,"character":units}});
+        if method == "textDocument/semanticTokens/full" {
+            params = json!({"textDocument":{"uri":uri}});
+        }
         if method == "textDocument/references" {
             params["context"] = json!({"includeDeclaration":true});
         }
@@ -339,16 +505,61 @@ impl Worker {
         }
         PathBuf::from(command)
     }
-    fn start(&mut self, name: &str, server: &Server, root: PathBuf) -> Option<String> {
-        let key = format!("{}:{name}:{}", self.epoch, root.display());
-        if self.sessions.contains_key(&key) {
-            return Some(key);
+    fn start(
+        &mut self,
+        name: &str,
+        server: &Server,
+        root: PathBuf,
+        database: Option<PathBuf>,
+    ) -> Option<String> {
+        let signature = format!(
+            "{}:{name}:{}:{}",
+            self.epoch,
+            root.display(),
+            database
+                .as_ref()
+                .map_or(String::new(), |p| p.display().to_string())
+        );
+        if let Some((key, _)) = self
+            .sessions
+            .iter()
+            .find(|(_, session)| session.signature == signature)
+        {
+            return Some(key.clone());
         }
-        if self.failed.contains(&key) {
+        if self.failed.contains(&signature) {
             return None;
         }
-        let mut child = match Command::new(Self::executable(&server.command[0]))
-            .args(&server.command[1..])
+        // A newly discovered database replaces the existing project session.
+        // Preserve every open document, keeping its newest unsaved version.
+        let superseded: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|(_, s)| s.name == name && s.root == root)
+            .map(|(key, _)| key.clone())
+            .collect();
+        let mut documents = HashMap::new();
+        for old in superseded {
+            if let Some(session) = self.sessions.remove(&old) {
+                for document in session.documents.values().cloned() {
+                    keep_latest(&mut documents, document);
+                }
+            }
+        }
+        self.id += 1;
+        let key = format!("{signature}:{}", self.id);
+        let mut command = server.command.clone();
+        if name == "clangd"
+            && !command
+                .iter()
+                .any(|arg| arg.starts_with("--compile-commands-dir"))
+        {
+            if let Some(dir) = &database {
+                command.push(format!("--compile-commands-dir={}", dir.display()));
+            }
+        }
+        let mut child = match Command::new(Self::executable(&command[0]))
+            .args(&command[1..])
             .current_dir(&root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -357,7 +568,7 @@ impl Worker {
         {
             Ok(c) => c,
             Err(e) => {
-                self.failed.push(key);
+                self.failed.push(signature);
                 let _ = self.output.send(Event::Status(format!("{name}: {e}")));
                 return None;
             }
@@ -386,19 +597,79 @@ impl Worker {
             child,
             stdin,
             ready: false,
-            documents: HashMap::new(),
+            documents,
             incremental: false,
             pending_saves: vec![],
+            signature,
+            database_stamp: database_stamp(&database),
+            database,
+            semantic_types: vec![],
+            semantic_modifiers: vec![],
             root: root.clone(),
             name: name.into(),
             requests: HashMap::new(),
         };
-        let _=session.send(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":std::process::id(),"rootUri":uri(&root),"workspaceFolders":[{"uri":uri(&root),"name":root.file_name().unwrap_or_default().to_string_lossy()}],"capabilities":{"general":{"positionEncodings":["utf-16"]},"textDocument":{"publishDiagnostics":{"versionSupport":true},"completion":{"completionItem":{"snippetSupport":false}}}}}}));
+        let _=session.send(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":std::process::id(),"rootUri":uri(&root),"workspaceFolders":[{"uri":uri(&root),"name":root.file_name().unwrap_or_default().to_string_lossy()}],"capabilities":{"workspace":{"semanticTokens":{"refreshSupport":true}},"general":{"positionEncodings":["utf-16"]},"textDocument":{"publishDiagnostics":{"versionSupport":true},"semanticTokens":{"requests":{"full":true,"range":false},"tokenTypes":["namespace","type","class","enum","interface","struct","typeParameter","parameter","variable","property","enumMember","event","function","method","macro","keyword","modifier","comment","string","number","regexp","operator","decorator"],"tokenModifiers":["declaration","definition","readonly","static","deprecated","abstract","async","modification","documentation","defaultLibrary"],"formats":["relative"],"overlappingTokenSupport":false,"multilineTokenSupport":false},"completion":{"completionItem":{"snippetSupport":false}}}}}}));
         self.sessions.insert(key.clone(), session);
         Some(key)
     }
+    fn restart_project(&mut self, root: &Path) {
+        let keys: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|(_, s)| {
+                s.name == "clangd" && (s.root.starts_with(root) || root.starts_with(&s.root))
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        let mut documents = HashMap::new();
+        for key in keys {
+            if let Some(session) = self.sessions.remove(&key) {
+                for document in session.documents.values().cloned() {
+                    keep_latest(&mut documents, document);
+                }
+            }
+        }
+        self.failed.retain(|key| !key.contains(":clangd:"));
+        for document in documents.into_values() {
+            let _ = self.sender.send(Input::Document(document));
+        }
+    }
+    fn refresh_databases(&mut self) {
+        let Some(server) = self.settings.servers.get("clangd") else {
+            return;
+        };
+        let roots: Vec<_> = self
+            .sessions
+            .values()
+            .filter(|s| s.name == "clangd")
+            .filter_map(|s| {
+                let document = s.documents.values().next()?;
+                let database = compilation_database(
+                    &document.path,
+                    &s.root,
+                    server.compile_commands_dir.as_deref(),
+                );
+                (database != s.database || database_stamp(&database) != s.database_stamp)
+                    .then(|| s.root.clone())
+            })
+            .collect();
+        for root in roots {
+            self.restart_project(&root);
+        }
+    }
     fn run(&mut self, input: Receiver<Input>) {
-        while let Ok(event) = input.recv() {
+        let mut checked = Instant::now();
+        loop {
+            if checked.elapsed() >= Duration::from_secs(1) {
+                self.refresh_databases();
+                checked = Instant::now();
+            }
+            let event = match input.recv_timeout(Duration::from_millis(250)) {
+                Ok(event) => event,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
             match event {
                 Input::Stop => break,
                 Input::Settings(s) => {
@@ -407,6 +678,9 @@ impl Worker {
                     self.settings = s;
                     self.sessions.clear();
                     self.failed.clear();
+                }
+                Input::ProjectBuilt(root) => {
+                    self.restart_project(&root);
                 }
                 Input::Document(d) => {
                     let enabled = self.settings.syntax
@@ -429,9 +703,20 @@ impl Worker {
                     configs.sort_by(|a, b| a.0.cmp(&b.0));
                     for (name, server) in configs {
                         let root = Self::root(&d.path, &server);
-                        if let Some(key) = self.start(&name, &server, root) {
+                        let database = (name == "clangd")
+                            .then(|| {
+                                compilation_database(
+                                    &d.path,
+                                    &root,
+                                    server.compile_commands_dir.as_deref(),
+                                )
+                            })
+                            .flatten();
+                        if let Some(key) = self.start(&name, &server, root, database) {
                             let session = self.sessions.get_mut(&key).unwrap();
                             session.update(d.clone());
+                            self.id += 1;
+                            session.semantic(self.id, &d.path);
                             if self.settings.completion {
                                 if let Some((row, col)) = d.cursor {
                                     self.id += 1;
@@ -478,7 +763,7 @@ impl Worker {
                         let _ = self
                             .output
                             .send(Event::Status(format!("{} exited: {error}", session.name)));
-                        self.failed.push(key);
+                        self.failed.push(session.signature.clone());
                     }
                 }
                 Input::Rpc(key, value) => {
@@ -566,6 +851,14 @@ impl Worker {
                                 _ => Value::Null,
                             };
                             let _ = session.send(json!({"jsonrpc":"2.0","id":id,"result":result}));
+                            if method == "workspace/semanticTokens/refresh" {
+                                let paths: Vec<_> =
+                                    session.documents.values().map(|d| d.path.clone()).collect();
+                                for path in paths {
+                                    self.id += 1;
+                                    session.semantic(self.id, &path);
+                                }
+                            }
                         }
                     } else if value["id"] == 1 {
                         if value.get("error").is_some() {
@@ -576,6 +869,16 @@ impl Worker {
                             continue;
                         }
                         session.ready = true;
+                        let semantic = &value["result"]["capabilities"]["semanticTokensProvider"];
+                        if semantic["full"] == true || semantic["full"].is_object() {
+                            session.semantic_types =
+                                serde_json::from_value(semantic["legend"]["tokenTypes"].clone())
+                                    .unwrap_or_default();
+                            session.semantic_modifiers = serde_json::from_value(
+                                semantic["legend"]["tokenModifiers"].clone(),
+                            )
+                            .unwrap_or_default();
+                        }
                         let sync = &value["result"]["capabilities"]["textDocumentSync"];
                         session.incremental =
                             sync.as_u64() == Some(2) || sync["change"].as_u64() == Some(2);
@@ -583,6 +886,8 @@ impl Worker {
                         let documents = std::mem::take(&mut session.documents);
                         for d in documents.into_values() {
                             session.update(d.clone());
+                            self.id += 1;
+                            session.semantic(self.id, &d.path);
                             if self.settings.completion {
                                 if let Some((row, col)) = d.cursor {
                                     self.id += 1;
@@ -610,6 +915,26 @@ impl Worker {
                         {
                             if let Some(path) = from_uri(&uri) {
                                 if value.get("error").is_none() {
+                                    if method == "textDocument/semanticTokens/full" {
+                                        if let Some(d) = session
+                                            .documents
+                                            .get(&uri)
+                                            .filter(|d| d.version == version)
+                                        {
+                                            let spans = semantic_spans(
+                                                &d.text,
+                                                &value["result"],
+                                                &session.semantic_types,
+                                                &session.semantic_modifiers,
+                                            );
+                                            let _ = self.output.send(Event::Semantic {
+                                                path,
+                                                version,
+                                                spans,
+                                            });
+                                        }
+                                        continue;
+                                    }
                                     let _ = self.output.send(Event::Response {
                                         method,
                                         path,
@@ -644,6 +969,150 @@ mod tests {
             &b"Content-Length: 999999999\r\n\r\n"[..]
         ))
         .is_err());
+    }
+    #[test]
+    fn real_clangd_reloads_a_generated_database_and_produces_semantic_highlights() {
+        let Ok(command) = std::env::var("FVIM_TEST_CLANGD") else {
+            return;
+        };
+        if command.is_empty() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("fvim-real-clangd-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("include")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let path = root.join("src/main.c");
+        let text="#include \"project.h\"\n#ifndef PROJECT_DEFINE\n#error missing compile command macro\n#endif\nProjectType run(ProjectType input) { return input; }\n";
+        std::fs::write(&path, text).unwrap();
+        std::fs::write(root.join("include/project.h"), "typedef int ProjectType;\n").unwrap();
+        let mut settings = crate::config::Settings::default().tooling;
+        settings.servers.retain(|name, _| name == "clangd");
+        settings.servers.get_mut("clangd").unwrap().command =
+            vec![command, "--background-index".into()];
+        let tools = Tools::new(settings);
+        tools.document(Document {
+            path: path.clone(),
+            version: 1,
+            text: text.into(),
+            filetype: "c".into(),
+            cursor: None,
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut missing = false;
+        while std::time::Instant::now() < deadline && !missing {
+            for event in tools.poll() {
+                if let Event::Diagnostics {
+                    path: got, items, ..
+                } = event
+                {
+                    if got == path {
+                        missing = items.iter().any(|d| d.severity == 1);
+                    }
+                }
+            }
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            missing,
+            "Real clangd did not report absent include paths/macros"
+        );
+        std::fs::create_dir_all(root.join("build/debug")).unwrap();
+        let database = json!([{"directory":root,"file":path,"arguments":["clang","-x","c","-std=c11","-I",root.join("include"),"-DPROJECT_DEFINE=1","-c",path]}]);
+        std::fs::write(
+            root.join("build/debug/compile_commands.json"),
+            database.to_string(),
+        )
+        .unwrap();
+        // The run stage can remain interactive: discovery must refresh without
+        // waiting for the build command to exit or for the source to change.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut clean = false;
+        let mut highlighted = false;
+        let mut messages = vec![];
+        while std::time::Instant::now() < deadline && !(clean && highlighted) {
+            for event in tools.poll() {
+                match event {
+                    Event::Diagnostics {
+                        path: got, items, ..
+                    } if got == path => {
+                        clean = items.is_empty();
+                        messages = items.iter().map(|d| d.message.clone()).collect();
+                    }
+                    Event::Semantic {
+                        path: got, spans, ..
+                    } if got == path => {
+                        highlighted = spans
+                            .iter()
+                            .any(|span| span.row == 4 && span.start == 0 && span.group == "Type");
+                    }
+                    _ => {}
+                }
+            }
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+        drop(tools);
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(clean && highlighted,"Real clangd did not consume generated compilation database: clean={clean}, highlighted={highlighted}, diagnostics={messages:?}");
+    }
+    #[test]
+    fn restart_replay_keeps_the_newest_document_in_any_order() {
+        let document = |version| Document {
+            path: PathBuf::from("latest.c"),
+            version,
+            text: format!("version {version}"),
+            filetype: "c".into(),
+            cursor: None,
+        };
+        for versions in [[1, 2, 1], [2, 1, 2]] {
+            let mut documents = HashMap::new();
+            for version in versions {
+                keep_latest(&mut documents, document(version));
+            }
+            assert_eq!(documents.len(), 1);
+            assert_eq!(documents.values().next().unwrap().text, "version 2");
+        }
+    }
+    #[test]
+    fn semantic_tokens_decode_relative_positions_utf16_and_readonly_variables() {
+        let text = "😀 Thing value;\nThing call();";
+        let spans = semantic_spans(
+            text,
+            &json!({"data":[0,3,5,0,0,0,6,5,1,1,1,6,4,2,0]}),
+            &["type".into(), "variable".into(), "function".into()],
+            &["readonly".into()],
+        );
+        assert_eq!(
+            (spans[0].row, spans[0].start, spans[0].end, spans[0].group),
+            (0, 2, 7, "Type")
+        );
+        assert_eq!(spans[1].group, "Constant");
+        assert_eq!((spans[2].row, spans[2].start, spans[2].end), (1, 6, 10));
+    }
+    #[test]
+    fn compilation_database_discovery_prefers_source_ancestors_then_build_directories() {
+        let root = std::env::temp_dir().join(format!("fvim-cdb-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("build/debug")).unwrap();
+        std::fs::write(root.join("build/debug/compile_commands.json"), "[]").unwrap();
+        assert_eq!(
+            compilation_database(&root.join("src/test.c"), &root, None),
+            Some(root.join("build/debug"))
+        );
+        std::fs::write(root.join("compile_commands.json"), "[]").unwrap();
+        assert_eq!(
+            compilation_database(&root.join("src/test.c"), &root, None),
+            Some(root.clone())
+        );
+        assert_eq!(
+            compilation_database(
+                &root.join("src/test.c"),
+                &root,
+                Some(Path::new("build/debug"))
+            ),
+            Some(root.join("build/debug"))
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn settings_reload_discards_queued_events_from_previous_generation() {

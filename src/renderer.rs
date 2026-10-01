@@ -114,6 +114,9 @@ impl Renderer {
         }
         let normal = s.highlight("Normal");
         let visual = s.highlight("Visual");
+        if editor.terminal.is_some() {
+            return self.prepare_terminal(editor, size, pane, clear);
+        }
         let mode_message = if s.showmode && editor.mode != Mode::Normal {
             format!("-- {} --", editor.mode_name())
         } else {
@@ -300,6 +303,15 @@ impl Renderer {
                                 .take_while(|span| span.row == row)
                                 .find(|span| span.start <= col && col < span.end)
                                 .map_or(normal, |span| s.highlight(span.group));
+                            let semantic_first =
+                                editor.semantic.partition_point(|span| span.row < row);
+                            if let Some(span) = editor.semantic[semantic_first..]
+                                .iter()
+                                .take_while(|span| span.row == row)
+                                .find(|span| span.start <= col && col < span.end)
+                            {
+                                style = s.highlight(span.group);
+                            }
                             if show_diagnostics && s.tooling.diagnostics.underline {
                                 if let Some(d) =
                                     editor.diagnostics.iter().find(|d| d.contains(row, col))
@@ -397,13 +409,28 @@ impl Renderer {
             )
         };
         overlays(editor, &mut frame, (x, y), columns, usize::from(height));
+        self.finish_frame(
+            size,
+            clear,
+            frame,
+            (x as u16, y as u16, editor.mode == Mode::Insert),
+            s,
+        )
+    }
+    fn finish_frame(
+        &mut self,
+        size: (u16, u16),
+        clear: bool,
+        frame: Vec<Line>,
+        cursor: (u16, u16, bool),
+        s: &Settings,
+    ) -> Option<Update> {
         self.changed.clear();
         for (row, line) in frame.iter().enumerate() {
             if clear || self.lines.get(row) != Some(line) {
                 self.changed.push(row);
             }
         }
-        let cursor = (x as u16, y as u16, editor.mode == Mode::Insert);
         let shape = if cursor.2 {
             &s.insert_cursor
         } else {
@@ -422,12 +449,118 @@ impl Renderer {
         Some(update)
     }
 
+    fn prepare_terminal(
+        &mut self,
+        editor: &Editor,
+        size: (u16, u16),
+        pane: bool,
+        clear: bool,
+    ) -> Option<Update> {
+        let screen = editor.terminal.as_ref().unwrap();
+        let s = &editor.settings;
+        let normal = s.highlight("Normal");
+        let commands = if pane {
+            0
+        } else {
+            s.cmdheight.max(1).min(size.1 as usize)
+        };
+        let status = usize::from(s.laststatus >= 2 && size.1 as usize > commands + 1);
+        let rows = size.1 as usize - commands - status;
+        let mut frame = Vec::with_capacity(size.1 as usize);
+        for row in 0..rows {
+            let mut line = Line::default();
+            for col in 0..size.0 {
+                if let Some(cell) = screen.cell(row as u16, col) {
+                    if cell.is_wide_continuation() {
+                        continue;
+                    }
+                    let mut style = normal;
+                    match cell.fgcolor() {
+                        vt100::Color::Idx(index) => {
+                            style.fg = None;
+                            style.ctermfg = Some(index);
+                        }
+                        vt100::Color::Rgb(r, g, b) => {
+                            style.fg = Some((r, g, b));
+                            style.ctermfg = None;
+                        }
+                        _ => {}
+                    }
+                    match cell.bgcolor() {
+                        vt100::Color::Idx(index) => {
+                            style.bg = None;
+                            style.ctermbg = Some(index);
+                        }
+                        vt100::Color::Rgb(r, g, b) => {
+                            style.bg = Some((r, g, b));
+                            style.ctermbg = None;
+                        }
+                        _ => {}
+                    }
+                    style.bold = cell.bold();
+                    style.italic = cell.italic();
+                    style.underline = cell.underline();
+                    style.reverse = cell.inverse();
+                    line.add(
+                        if cell.has_contents() {
+                            cell.contents()
+                        } else {
+                            " "
+                        },
+                        style,
+                    );
+                } else {
+                    line.add(" ", normal);
+                }
+            }
+            frame.push(line);
+        }
+        if status > 0 {
+            let mut line = Line::default();
+            line.add(
+                &statusline(editor, size.0 as usize),
+                s.highlight("StatusLine"),
+            );
+            frame.push(line);
+        }
+        if commands > 0 {
+            frame.push(Line::visible(
+                &editor.command_line(),
+                0,
+                size.0 as usize,
+                s.tabstop,
+                normal,
+                normal,
+                |_| false,
+            ));
+            for _ in 1..commands {
+                frame.push(Line::default());
+            }
+        }
+        let (row, col) = screen.cursor_position();
+        let cursor = if let Some(prompt) = editor.prompt.as_ref().filter(|_| !pane) {
+            (
+                (prompt.text.chars().count() + 1).min(size.0 as usize - 1) as u16,
+                (rows + status) as u16,
+                false,
+            )
+        } else {
+            (
+                col.min(size.0 - 1),
+                row.min(rows.saturating_sub(1) as u16),
+                editor.mode == Mode::Insert,
+            )
+        };
+        self.finish_frame(size, clear, frame, cursor, s)
+    }
+
     pub fn draw_workspace(
         &mut self,
         workspace: &mut crate::workspace::Workspace,
         size: (u16, u16),
         out: &mut impl Write,
     ) -> io::Result<()> {
+        workspace.resize_terminal(size);
         if workspace.windows.iter().flatten().count() == 1 && workspace.picker.is_none() {
             let editor = workspace.editor_mut();
             editor.page_rows = (size.1 as usize)
@@ -868,6 +1001,21 @@ mod tests {
         assert!(output.is_empty());
     }
 
+    #[test]
+    fn build_terminal_renders_inside_the_pane_with_status_and_ansi_colors() {
+        let mut e = Editor::new(Buffer::from_text(""));
+        let mut terminal = vt100::Parser::new(5, 40, 0);
+        terminal.process(b"\x1b[32mINPUT_PROMPT: ");
+        e.terminal = Some(terminal.screen().clone());
+        e.mode = Mode::Insert;
+        e.title = Some("[Build]".into());
+        let mut r = Renderer::default();
+        let update = r.prepare(&e, (40, 7)).unwrap();
+        assert!(r.lines[0].text.contains("INPUT_PROMPT:"));
+        assert_eq!(r.lines[0].spans[0].1.ctermfg, Some(2));
+        assert!(r.lines[5].text.contains("[Build]"));
+        assert_eq!(update.cursor.0, 14);
+    }
     #[test]
     fn completion_scrolls_to_selected_items_beyond_popup_height() {
         let mut e = Editor::new(Buffer::from_text("x"));

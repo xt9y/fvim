@@ -40,7 +40,8 @@ while True:
     params = message.get("params", {})
     request_id = message.get("id")
     if method == "initialize":
-        send(dict(id=request_id, result=dict(capabilities=dict(textDocumentSync=2,
+        assert "semanticTokens" in params["capabilities"]["textDocument"]
+        send(dict(id=request_id, result=dict(capabilities=dict(semanticTokensProvider=dict(legend=dict(tokenTypes=["type","function","variable"],tokenModifiers=["readonly"]),full=True),textDocumentSync=2,
                   completionProvider=dict(triggerCharacters=["."]), hoverProvider=True,
                   definitionProvider=True, referencesProvider=True))))
     elif method in ("textDocument/didOpen", "textDocument/didChange"):
@@ -54,6 +55,8 @@ while True:
         send(dict(method="textDocument/publishDiagnostics", params=dict(uri=doc["uri"],
                   version=doc["version"], diagnostics=[dict(range=dict(start=dict(line=0, character=4),
                   end=dict(line=0, character=8)), severity=1, source="fixture-lsp", message="fixture saved diagnostic")])))
+    elif method == "textDocument/semanticTokens/full":
+        send(dict(id=request_id,result=dict(data=[0,0,3,0,0])))
     elif method == "textDocument/completion":
         pos = params["position"]
         send(dict(id=request_id, result=[dict(label="fixture_completion", insertText="fixture_completion",

@@ -26,7 +26,7 @@ use crossterm::{
 };
 use renderer::Renderer;
 use std::env;
-use std::io::{self, BufWriter, IsTerminal, Write};
+use std::io::{self, BufWriter, IsTerminal};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use workspace::Workspace;
@@ -75,34 +75,9 @@ fn edit(path: Option<PathBuf>) -> io::Result<()> {
     let mut out =
         BufWriter::with_capacity(workspace.settings.output_buffer_size, io::stdout().lock());
     let mut redraw = true;
-    let mut building = false;
     loop {
-        if workspace.build.is_some() && !building {
-            out.flush()?;
-            execute!(
-                out,
-                ResetColor,
-                SetAttribute(Attribute::Reset),
-                LeaveAlternateScreen,
-                DisableBracketedPaste,
-                Show
-            )?;
-            out.flush()?;
-            building = true;
-        }
         redraw |= workspace.poll();
-        if building {
-            out.write_all(std::mem::take(&mut workspace.terminal_output).as_bytes())?;
-            out.flush()?;
-            if workspace.build.is_none() {
-                execute!(out, EnterAlternateScreen, EnableBracketedPaste, Hide)?;
-                out.flush()?;
-                renderer.invalidate();
-                building = false;
-                redraw = true;
-            }
-        }
-        if redraw && !building {
+        if redraw {
             let size = terminal::size()?;
             renderer.draw_workspace(&mut workspace, size, &mut out)?;
         }
@@ -116,30 +91,12 @@ fn edit(path: Option<PathBuf>) -> io::Result<()> {
             continue;
         }
         let input = event::read()?;
-        if building {
-            if let Some(build) = &mut workspace.build {
-                match input {
-                    Event::Key(key) if key.kind != KeyEventKind::Release => {
-                        if key.code == KeyCode::Char('q')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)
-                        {
-                            build.cancel();
-                        } else {
-                            let _ = build.input(&terminal_key(key));
-                        }
-                    }
-                    Event::Paste(text) => {
-                        let _ = build.input(text.as_bytes());
-                    }
-                    Event::Resize(cols, rows) => build.resize(cols, rows),
-                    _ => {}
-                }
-            }
-            continue;
-        }
         match input {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
-                if key.code == KeyCode::Char('l') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                if !workspace.terminal_input()
+                    && key.code == KeyCode::Char('l')
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                {
                     renderer.invalidate();
                     continue;
                 }
@@ -170,10 +127,13 @@ fn edit(path: Option<PathBuf>) -> io::Result<()> {
     }
 }
 
-fn terminal_key(key: crossterm::event::KeyEvent) -> Vec<u8> {
+pub(crate) fn terminal_key(key: crossterm::event::KeyEvent) -> Vec<u8> {
     let text = match key.code {
         KeyCode::Char(ch) if key.modifiers.contains(KeyModifiers::CONTROL) => {
             let ch = ch.to_ascii_lowercase();
+            if ('4'..='7').contains(&ch) {
+                return vec![(ch as u8) - b'4' + 0x1c];
+            }
             if ch == ' ' {
                 "\0".into()
             } else if ('@'..='_').contains(&ch) || ch.is_ascii_lowercase() {
@@ -243,6 +203,30 @@ fn main() -> ExitCode {
         Err(error) => {
             eprintln!("fvim: {error}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::*;
+    #[test]
+    fn legacy_control_backslash_and_control_letters_are_forwarded_as_bytes() {
+        for (ch, byte) in [
+            ('4', 0x1c),
+            ('5', 0x1d),
+            ('6', 0x1e),
+            ('7', 0x1f),
+            ('n', 0x0e),
+            ('\\', 0x1c),
+        ] {
+            assert_eq!(
+                terminal_key(crossterm::event::KeyEvent::new(
+                    KeyCode::Char(ch),
+                    KeyModifiers::CONTROL
+                )),
+                vec![byte]
+            );
         }
     }
 }

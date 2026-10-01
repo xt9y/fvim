@@ -98,7 +98,8 @@ pub struct Workspace {
     pub build: Option<crate::diagnostics::Build>,
     tools: crate::tooling::Tools,
     saved_generations: HashMap<usize, u64>,
-    pub terminal_output: String,
+    terminal_prefix: bool,
+    terminal_window: Option<usize>,
     diagnostics: HashMap<(PathBuf, String), Vec<crate::diagnostics::Diagnostic>>,
     synced: HashMap<usize, (u64, PathBuf, u64, bool)>,
     versions: HashMap<PathBuf, u64>,
@@ -134,7 +135,8 @@ impl Workspace {
             tools: crate::tooling::Tools::new(settings.tooling.clone()),
             build: None,
             saved_generations: HashMap::new(),
-            terminal_output: String::new(),
+            terminal_prefix: false,
+            terminal_window: None,
             diagnostics: HashMap::new(),
             synced: HashMap::new(),
             versions: HashMap::new(),
@@ -168,6 +170,7 @@ impl Workspace {
             editor.settings = self.settings.for_path(editor.buffer.path.as_deref());
             editor.diagnostics.clear();
             editor.syntax.clear();
+            editor.semantic.clear();
             editor.popup = None;
             editor.completion = None;
         }
@@ -412,8 +415,18 @@ impl Workspace {
                 e.title = Some("[Build]".into());
                 e.settings.tooling.diagnostics.virtual_text = false;
                 e.message = "Build running; Ctrl-C stops it".into();
-                self.store_cursor();
-                self.editor_mut().cancel_selection();
+                if let Some(window) = self
+                    .terminal_window
+                    .filter(|id| self.windows.get(*id).is_some_and(Option::is_some))
+                {
+                    self.focus(window);
+                } else {
+                    self.split(Axis::Horizontal, None)?;
+                    self.terminal_window = Some(self.active);
+                }
+                e.terminal = Some(build.screen().clone());
+                e.mode = Mode::Insert;
+                e.message = "Terminal: Ctrl-\\ Ctrl-N returns to Normal; Ctrl-Q stops build".into();
                 self.buffers.push(e);
                 let w = self.windows[self.active].as_mut().unwrap();
                 w.buffer = id;
@@ -421,6 +434,7 @@ impl Workspace {
                 w.col = 0;
                 w.goal = None;
                 self.build = Some(build);
+                self.terminal_prefix = false;
                 self.diagnostics
                     .retain(|(_, source), _| source != "compiler");
             }
@@ -534,6 +548,44 @@ impl Workspace {
     pub fn key(&mut self, key: KeyEvent) -> bool {
         self.last_input = Instant::now();
         self.editor_mut().popup = None;
+        if self.terminal_input() {
+            let control = key.modifiers.contains(KeyModifiers::CONTROL);
+            if self.terminal_prefix {
+                self.terminal_prefix = false;
+                if control && key.code == KeyCode::Char('n') {
+                    self.editor_mut().mode = Mode::Normal;
+                    self.editor_mut().message =
+                        "Terminal Normal: i resumes input; Ctrl-W changes pane".into();
+                    return false;
+                }
+                if let Some(build) = &mut self.build {
+                    let _ = build.input(b"\x1c");
+                }
+            }
+            if control && matches!(key.code, KeyCode::Char('\\' | '4' | '\x1c')) {
+                self.terminal_prefix = true;
+                return false;
+            }
+            if let Some(build) = &mut self.build {
+                if control && key.code == KeyCode::Char('q') {
+                    build.cancel();
+                } else {
+                    let _ = build.input(&crate::terminal_key(key));
+                }
+            }
+            return false;
+        }
+        if self.editor().terminal.is_some()
+            && self.editor().mode == Mode::Normal
+            && self.editor().mapping_ready()
+            && !self.window_prefix
+            && self.pending_keys.is_empty()
+            && key.code == KeyCode::Char('i')
+        {
+            self.editor_mut().mode = Mode::Insert;
+            self.editor_mut().message = "Terminal: Ctrl-\\ Ctrl-N returns to Normal".into();
+            return false;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             if let Some(build) = &mut self.build {
                 build.cancel();
@@ -677,7 +729,48 @@ impl Workspace {
         }
         false
     }
+    pub fn terminal_input(&self) -> bool {
+        self.editor().terminal.is_some()
+            && self.editor().mode == Mode::Insert
+            && self.build.as_ref().is_some_and(|build| {
+                self.windows[self.active].as_ref().unwrap().buffer == build.buffer
+            })
+    }
+    pub fn resize_terminal(&mut self, size: (u16, u16)) {
+        let Some(id) = self.build.as_ref().map(|build| build.buffer) else {
+            return;
+        };
+        let rects = self.rectangles(
+            size.0,
+            size.1.saturating_sub(self.settings.cmdheight.max(1) as u16),
+        );
+        let Some((_, rect)) = rects
+            .into_iter()
+            .find(|(window, _)| self.windows[*window].as_ref().unwrap().buffer == id)
+        else {
+            return;
+        };
+        let cols = rect
+            .width
+            .saturating_sub(u16::from(rect.x + rect.width < size.0))
+            .max(1);
+        let rows = rect
+            .height
+            .saturating_sub(u16::from(self.settings.laststatus >= 2))
+            .max(1);
+        let build = self.build.as_mut().unwrap();
+        if build.screen().size() != (rows, cols) {
+            build.resize(cols, rows);
+            self.buffers[id].terminal = Some(build.screen().clone());
+        }
+    }
     pub fn paste(&mut self, text: &str) {
+        if self.terminal_input() {
+            if let Some(build) = &mut self.build {
+                let _ = build.input(text.as_bytes());
+            }
+            return;
+        }
         self.last_input = Instant::now();
         self.editor_mut().completion = None;
         self.editor_mut().popup = None;

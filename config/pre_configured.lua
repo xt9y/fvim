@@ -136,5 +136,8 @@ native_highlight('Number',{fg='#d3869b',ctermfg=175})
 native_highlight('Keyword',{fg='#fb4934',ctermfg=167,bold=true})
 native_highlight('Type',{fg='#fabd2f',ctermfg=214})
 native_highlight('Function',{fg='#8ec07c',ctermfg=108})
+native_highlight('Variable',{fg='#83a598',ctermfg=109})
+native_highlight('Property',{fg='#fe8019',ctermfg=208})
+native_highlight('Constant',{fg='#d3869b',ctermfg=175})
 
 fvim.comments.bash = fvim.comments.sh

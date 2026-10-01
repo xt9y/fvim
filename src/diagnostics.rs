@@ -57,6 +57,16 @@ impl Diagnostic {
     }
 }
 
+pub fn plain_output(text: &str) -> String {
+    use std::sync::OnceLock;
+    static ANSI: OnceLock<regex::Regex> = OnceLock::new();
+    ANSI.get_or_init(|| {
+        regex::Regex::new(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)").unwrap()
+    })
+    .replace_all(text, "")
+    .into_owned()
+}
+
 pub fn compiler(root: &Path, text: &str) -> Vec<Diagnostic> {
     use std::sync::OnceLock;
     static ANSI: OnceLock<regex::Regex> = OnceLock::new();
@@ -178,7 +188,7 @@ pub struct Build {
     process_group: Option<libc::pid_t>,
     master: Option<Box<dyn portable_pty::MasterPty + Send>>,
     writer: Option<Box<dyn Write + Send>>,
-    pub output: String,
+    parser: vt100::Parser,
     receiver: Receiver<BuildEvent>,
     pub text: String,
     readers: usize,
@@ -255,7 +265,7 @@ impl Build {
             child,
             master: Some(pair.master),
             writer: Some(writer),
-            output: format!("$ {}\r\n", command.join(" ")),
+            parser: vt100::Parser::new(rows, cols, 1000),
             receiver,
             text: format!("$ {}\n", command.join(" ")),
             readers: 1,
@@ -286,13 +296,13 @@ impl Build {
                     } else {
                         text
                     };
-                    self.output.push_str(&text);
+                    self.parser.process(text.as_bytes());
                     self.text.push_str(&text);
                 }
                 BuildEvent::Finished => {
                     #[cfg(windows)]
                     {
-                        self.output.push_str(&self.cursor_pending);
+                        self.parser.process(self.cursor_pending.as_bytes());
                         self.text
                             .push_str(&std::mem::take(&mut self.cursor_pending));
                     }
@@ -323,7 +333,11 @@ impl Build {
         }
         Ok(())
     }
-    pub fn resize(&self, cols: u16, rows: u16) {
+    pub fn screen(&self) -> &vt100::Screen {
+        self.parser.screen()
+    }
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        self.parser.screen_mut().set_size(rows, cols);
         if let Some(master) = &self.master {
             let _ = master.resize(portable_pty::PtySize {
                 rows,

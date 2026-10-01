@@ -74,16 +74,18 @@ impl Workspace {
         let mut diagnostic_changed = false;
         if let Some(build) = &mut self.build {
             let (changed, finished) = build.poll();
-            self.terminal_output
-                .push_str(&std::mem::take(&mut build.output));
+
             if changed {
                 redraw = true;
                 let e = &mut self.buffers[build.buffer];
                 let (row, col) = (e.buffer.row, e.buffer.col);
-                e.buffer = Buffer::from_text(&build.text);
+                e.buffer = Buffer::from_text(&crate::diagnostics::plain_output(&build.text));
+                e.terminal = Some(build.screen().clone());
                 e.buffer.row = row.min(e.buffer.lines.len() - 1);
                 e.buffer.col = col.min(e.buffer.lines[e.buffer.row].chars().count());
                 if finished {
+                    e.terminal = None;
+                    e.mode = Mode::Normal;
                     e.message = "Build finished. :bprevious returns to source.".into();
                 }
                 e.diagnostics = build
@@ -108,7 +110,9 @@ impl Workspace {
                 diagnostic_changed = true;
             }
             if finished {
+                self.tools.project_built(self.root.clone());
                 self.build = None;
+                self.terminal_prefix = false;
             }
         }
         let idle = self.last_input.elapsed().as_millis() >= self.settings.tooling.delay_ms as u128;
@@ -133,6 +137,7 @@ impl Workspace {
                     }
                     continue;
                 }
+                e.semantic.clear();
                 self.tool_version += 1;
                 let absolute =
                     tooling::from_uri(&tooling::uri(path)).unwrap_or_else(|| path.clone());
@@ -161,6 +166,23 @@ impl Workspace {
         }
         for event in self.tools.poll() {
             match event {
+                Event::Semantic {
+                    path,
+                    version,
+                    spans,
+                } => {
+                    if self.versions.get(&path) != Some(&version) {
+                        continue;
+                    }
+                    for (id, e) in self.buffers.iter_mut().enumerate() {
+                        if self.synced.get(&id).is_some_and(|(revision, _, v, _)| {
+                            *v == version && *revision == e.buffer.revision
+                        }) {
+                            e.semantic = spans.clone();
+                            redraw = true;
+                        }
+                    }
+                }
                 Event::Status(message) => {
                     if self.statuses.len() >= 20 {
                         self.statuses.remove(0);

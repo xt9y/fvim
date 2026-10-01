@@ -2,7 +2,7 @@ use mlua::{Lua, Table, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 pub const DEFAULTS: &str = include_str!("../config/pre_configured.lua");
@@ -59,6 +59,7 @@ pub struct Server {
     pub filetypes: Vec<String>,
     pub root_markers: Vec<String>,
     pub enabled: bool,
+    pub compile_commands_dir: Option<PathBuf>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiagnosticOptions {
@@ -231,6 +232,9 @@ function vim.cmd.colorscheme(name)
     local theme = assert(fvim.themes[name], 'Unknown colorscheme: '..tostring(name))
     local palette = assert(theme[vim.opt.background], 'Unknown background')
     fvim.highlights = copy(palette)
+    for group,values in pairs(fvim._native_highlights or {}) do
+        if fvim.highlights[group] == nil then fvim.highlights[group] = copy(values) end
+    end
     vim.g.colors_name = name
 end
 function vim.api.nvim_set_hl(ns, group, values)
@@ -355,7 +359,7 @@ impl Config {
         exec(&lua, DEFAULTS, "shipped pre_configured.lua")?;
         exec(
             &lua,
-            "fvim._shipped_workflow=fvim.workflow",
+            "fvim._shipped_workflow=fvim.workflow; fvim._native_highlights={}; for group,values in pairs(fvim.highlights) do if group:match('Diagnostic') or group=='Comment' or group=='String' or group=='Number' or group=='Keyword' or group=='Type' or group=='Function' or group=='Variable' or group=='Property' or group=='Constant' then fvim._native_highlights[group]=values end end",
             "shipped workflow",
         )?;
         exec(&lua, defaults, "pre_configured.lua")?;
@@ -649,6 +653,10 @@ fn read_settings(lua: &Lua) -> Result<Settings, String> {
                 filetypes: get(&t, "filetypes")?,
                 root_markers: get(&t, "root_markers")?,
                 enabled: boolean(&t, "enabled")?,
+                compile_commands_dir: t
+                    .get::<Option<String>>("compile_commands_dir")
+                    .map_err(|e| e.to_string())?
+                    .map(PathBuf::from),
             },
         );
     }
@@ -841,6 +849,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn older_installed_palettes_inherit_native_syntax_colors_and_personal_overrides_win() {
+        let old = "fvim.themes.retrobox={dark={Normal={fg='#ebdbb2',bg='#1c1c1c'}},light={}}; vim.cmd.colorscheme('retrobox')";
+        let c = Config::from_scripts(old, "").unwrap();
+        assert_ne!(
+            c.settings.highlight("Keyword").fg,
+            c.settings.highlight("Normal").fg
+        );
+        let c =
+            Config::from_scripts(old, "vim.api.nvim_set_hl(0,'Keyword',{fg='#123456'})").unwrap();
+        assert_eq!(c.settings.highlight("Keyword").fg, Some((18, 52, 86)));
+    }
     #[test]
     fn lua_theme_overrides_and_links_reach_typed_settings() {
         let c = Config::from_scripts(
