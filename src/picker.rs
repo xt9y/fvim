@@ -19,7 +19,8 @@ struct Results {
     message: String,
 }
 pub struct Picker {
-    pub grep: bool,
+    pub title: String,
+    static_items: Option<Vec<Entry>>,
     pub query: String,
     pub entries: Vec<Entry>,
     pub selected: usize,
@@ -198,7 +199,8 @@ impl Picker {
             })
             .map_err(|e| e.to_string())?;
         let mut picker = Self {
-            grep,
+            title: if grep { "Grep" } else { "Files" }.into(),
+            static_items: None,
             query: query.into(),
             entries: vec![],
             selected: 0,
@@ -212,7 +214,44 @@ impl Picker {
         picker.refresh();
         Ok(picker)
     }
+    pub fn from_entries(title: &str, entries: Vec<Entry>, settings: &Settings) -> Self {
+        let (sender, _) = mpsc::channel();
+        let (_, receiver) = mpsc::channel();
+        Self {
+            title: title.into(),
+            static_items: Some(entries.clone()),
+            query: String::new(),
+            entries,
+            selected: 0,
+            message: String::new(),
+            generation: 0,
+            sender,
+            receiver,
+            pending: vec![],
+            split_maps: settings
+                .keymaps
+                .iter()
+                .filter(|m| m.mode == "n" && matches!(m.action.as_str(), "split" | "vsplit"))
+                .cloned()
+                .collect(),
+        }
+    }
+    pub fn replace_entries(&mut self, entries: Vec<Entry>) {
+        self.static_items = Some(entries);
+        self.refresh();
+    }
     fn refresh(&mut self) {
+        if let Some(items) = &self.static_items {
+            self.entries = items
+                .iter()
+                .filter(|e| fuzzy(&e.label, &self.query).is_some())
+                .cloned()
+                .collect();
+            self.selected = self.selected.min(self.entries.len().saturating_sub(1));
+            self.message = format!("{} results", self.entries.len());
+            return;
+        }
+
         self.generation += 1;
         self.selected = 0;
         self.entries.clear();

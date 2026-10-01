@@ -53,7 +53,32 @@ pub struct Prompt {
     pub text: String,
 }
 
+#[derive(Clone)]
+pub struct CompletionEdit {
+    pub start: (usize, usize),
+    pub end: (usize, usize),
+    pub text: String,
+}
+
+#[derive(Clone)]
+pub struct Completion {
+    pub label: String,
+    pub text: String,
+    pub start: (usize, usize),
+    pub end: (usize, usize),
+    pub additional: Vec<CompletionEdit>,
+}
+pub struct CompletionMenu {
+    pub items: Vec<Completion>,
+    pub selected: Option<usize>,
+}
+
 pub struct Editor {
+    pub popup: Option<Vec<String>>,
+    pub completion: Option<CompletionMenu>,
+    pub title: Option<String>,
+    pub diagnostics: Vec<crate::diagnostics::Diagnostic>,
+    pub syntax: Vec<crate::syntax::Span>,
     pub settings: crate::config::Settings,
     pub config_command: Option<String>,
     pub workflow_command: Option<String>,
@@ -87,6 +112,11 @@ pub struct Editor {
 impl Editor {
     pub fn new(buffer: Buffer) -> Self {
         Self {
+            popup: None,
+            completion: None,
+            title: None,
+            diagnostics: vec![],
+            syntax: vec![],
             settings: crate::config::Settings::default(),
             config_command: None,
             workflow_command: None,

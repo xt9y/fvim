@@ -4,6 +4,11 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+fn next_revision() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 struct Position {
     row: usize,
     col: usize,
@@ -22,6 +27,8 @@ struct Change {
 }
 
 pub struct Buffer {
+    pub revision: u64,
+    pub save_generation: u64,
     pub lines: Vec<String>,
     pub row: usize,
     pub col: usize,
@@ -41,6 +48,9 @@ pub struct Buffer {
 
 impl Buffer {
     pub fn open(path: Option<PathBuf>) -> io::Result<Self> {
+        if path.as_ref().is_some_and(|p| p.is_dir()) {
+            return Err(io::Error::other("Cannot open a directory as a text buffer"));
+        }
         let (text, path) = match path {
             Some(path) => match fs::read_to_string(&path) {
                 Ok(text) => (text, Some(fs::canonicalize(path)?)),
@@ -73,6 +83,8 @@ impl Buffer {
         };
         let lines: Vec<_> = body.split('\n').map(str::to_owned).collect();
         let mut buffer = Self {
+            revision: next_revision(),
+            save_generation: 0,
             saved: lines.clone(),
             lines,
             row: 0,
@@ -283,6 +295,7 @@ impl Buffer {
         I: IntoIterator<Item = String>,
         I::IntoIter: ExactSizeIterator,
     {
+        self.revision = next_revision();
         let lines = lines.into_iter();
         let same_length = end - start == lines.len();
         let old_different = if same_length {
@@ -328,6 +341,7 @@ impl Buffer {
             self.begin_change();
             self.record_span(first, last + 1);
             let was_different = self.lines.get(first) != self.saved.get(first);
+            self.revision = next_revision();
             self.lines[first].replace_range(from..to, text);
             self.update_line(first, was_different);
             self.set_offset(next);
@@ -457,6 +471,7 @@ impl Buffer {
         self.saved_eol = self.eol;
         self.saved_format = true;
         self.different = 0;
+        self.save_generation += 1;
         Ok(())
     }
 }
@@ -507,6 +522,13 @@ pub fn write_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reloaded_buffers_have_distinct_document_revisions() {
+        let first = Buffer::from_text("before");
+        let second = Buffer::from_text("after");
+        assert_ne!(first.revision, second.revision);
+    }
 
     #[test]
     fn mixed_line_endings_are_dirty_until_normalized_save() {

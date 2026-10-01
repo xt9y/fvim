@@ -1,9 +1,11 @@
+mod tools;
 use crate::{
     buffer::Buffer,
     config::Settings,
     editor::{Editor, Mode},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::collections::HashMap;
 use std::{path::PathBuf, time::Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -93,6 +95,16 @@ pub struct Workspace {
     pub root: PathBuf,
     pub config_dir: PathBuf,
     pub settings: Settings,
+    pub build: Option<crate::diagnostics::Build>,
+    tools: crate::tooling::Tools,
+    saved_generations: HashMap<usize, u64>,
+    pub terminal_output: String,
+    diagnostics: HashMap<(PathBuf, String), Vec<crate::diagnostics::Diagnostic>>,
+    synced: HashMap<usize, (u64, PathBuf, u64, bool)>,
+    versions: HashMap<PathBuf, u64>,
+    tool_version: u64,
+    last_input: Instant,
+    statuses: Vec<String>,
     pub picker: Option<crate::picker::Picker>,
     pending_keys: Vec<KeyEvent>,
     pending_at: Instant,
@@ -119,6 +131,16 @@ impl Workspace {
             layout: Layout::Leaf(0),
             root,
             config_dir,
+            tools: crate::tooling::Tools::new(settings.tooling.clone()),
+            build: None,
+            saved_generations: HashMap::new(),
+            terminal_output: String::new(),
+            diagnostics: HashMap::new(),
+            synced: HashMap::new(),
+            versions: HashMap::new(),
+            tool_version: 0,
+            last_input: Instant::now(),
+            statuses: vec![],
             settings,
             picker: None,
             pending_keys: vec![],
@@ -135,9 +157,19 @@ impl Workspace {
         &mut self.buffers[id]
     }
     pub fn apply_settings(&mut self, settings: Settings) {
+        self.tools.settings(settings.tooling.clone());
+        self.synced.clear();
+        self.saved_generations.clear();
+        self.versions.clear();
+        self.diagnostics.clear();
+        self.statuses.clear();
         self.settings = settings;
         for editor in &mut self.buffers {
             editor.settings = self.settings.for_path(editor.buffer.path.as_deref());
+            editor.diagnostics.clear();
+            editor.syntax.clear();
+            editor.popup = None;
+            editor.completion = None;
         }
     }
     fn store_cursor(&mut self) {
@@ -364,29 +396,81 @@ impl Workspace {
                 self.editor_mut().settings = settings;
             }
             "make" => {
+                if self.build.is_some() {
+                    return Err("Build already running; Ctrl-C stops it".into());
+                }
                 self.editor_mut()
                     .buffer
                     .save()
                     .map_err(|e| format!("Save failed: {e}"))?;
-                let mut parts = self.settings.make_command.iter();
-                let mut c = std::process::Command::new(parts.next().ok_or("Empty make command")?);
-                let result = c
-                    .args(parts)
-                    .current_dir(&self.root)
-                    .stdin(std::process::Stdio::null())
-                    .output()
-                    .map_err(|e| format!("Build failed: {e}"))?;
-                let text = format!(
-                    "{}{}",
-                    String::from_utf8_lossy(&result.stdout),
-                    String::from_utf8_lossy(&result.stderr)
-                );
-                let mut e = Editor::new(Buffer::from_text(&text));
+                let command = crate::diagnostics::build_command(&self.root, &self.settings, arg)?;
+                let id = self.buffers.len();
+                let build = crate::diagnostics::Build::start(&self.root, &command, id)?;
+                let mut e = Editor::new(Buffer::from_text(&build.text));
                 e.workspace_managed = true;
                 e.settings = self.settings.clone();
-                e.message = format!("Build {}", result.status);
+                e.title = Some("[Build]".into());
+                e.settings.tooling.diagnostics.virtual_text = false;
+                e.message = "Build running; Ctrl-C stops it".into();
+                self.store_cursor();
+                self.editor_mut().cancel_selection();
                 self.buffers.push(e);
-                self.windows[self.active].as_mut().unwrap().buffer = self.buffers.len() - 1;
+                let w = self.windows[self.active].as_mut().unwrap();
+                w.buffer = id;
+                w.row = 0;
+                w.col = 0;
+                w.goal = None;
+                self.build = Some(build);
+                self.diagnostics
+                    .retain(|(_, source), _| source != "compiler");
+            }
+            "diagnostics" => {
+                let entries = self.diagnostic_entries();
+                let mut picker =
+                    crate::picker::Picker::from_entries("Diagnostics", entries, &self.settings);
+                picker.message = self.statuses.join(" | ");
+                self.picker = Some(picker);
+            }
+            "diagnostic_next" | "diagnostic_previous" => {
+                let position = (self.editor().buffer.row, self.editor().buffer.col);
+                let mut entries = self.editor().diagnostics.clone();
+                entries.sort_by_key(|d| (d.row, d.col));
+                let selected = if name == "diagnostic_next" {
+                    entries
+                        .iter()
+                        .find(|d| (d.row, d.col) > position)
+                        .or(entries.first())
+                } else {
+                    entries
+                        .iter()
+                        .rev()
+                        .find(|d| (d.row, d.col) < position)
+                        .or(entries.last())
+                };
+                if let Some(d) = selected {
+                    let (row, col) = (d.row, d.col);
+                    let e = self.editor_mut();
+                    e.buffer.row = row.min(e.buffer.lines.len() - 1);
+                    e.buffer.col = col.min(
+                        e.buffer.lines[e.buffer.row]
+                            .chars()
+                            .count()
+                            .saturating_sub(1),
+                    );
+                }
+            }
+            "diagnostic_float" => {
+                self.cursor_diagnostics();
+            }
+            "hover" | "definition" | "references" => {
+                let e = self.editor();
+                let path = e.buffer.path.clone().ok_or("No file for LSP request")?;
+                let method = match name {
+                    "hover" => "textDocument/hover",
+                    "definition" => "textDocument/definition",
+                    _ => "textDocument/references",
+                };
+                self.tools.request(path, e.buffer.row, e.buffer.col, method);
             }
             "comment" | "blockcomment" => {
                 let ft = self.settings.filetype(self.editor().buffer.path.as_deref());
@@ -448,6 +532,30 @@ impl Workspace {
         }
     }
     pub fn key(&mut self, key: KeyEvent) -> bool {
+        self.last_input = Instant::now();
+        self.editor_mut().popup = None;
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            if let Some(build) = &mut self.build {
+                build.cancel();
+                return false;
+            }
+        }
+        if self.editor().mode == Mode::Insert {
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Null | KeyCode::Char(' '))
+            {
+                let e = self.editor();
+                if let Some(path) = e.buffer.path.clone() {
+                    self.tools
+                        .request(path, e.buffer.row, e.buffer.col, "textDocument/completion");
+                }
+                return false;
+            }
+            if self.completion_key(key) {
+                return false;
+            }
+        }
+
         if self.picker.is_some() {
             self.pending_at = Instant::now();
             return self.picker_key(key);
@@ -530,7 +638,11 @@ impl Workspace {
                 return self.key(last);
             }
         }
+        let inserting = self.editor().mode == Mode::Insert;
         let quit = self.editor_mut().key(key);
+        if inserting && self.editor().mode == Mode::Normal {
+            self.refresh_diagnostics();
+        }
         quit || self.dispatch()
     }
     fn picker_key(&mut self, key: KeyEvent) -> bool {
@@ -538,6 +650,16 @@ impl Workspace {
         if let Some(selection) = selection {
             self.picker = None;
             if let Some((entry, axis)) = selection {
+                if entry.path.as_os_str().is_empty() {
+                    if let Some(id) = self
+                        .buffers
+                        .iter()
+                        .rposition(|e| e.title.as_deref() == Some("[Build]"))
+                    {
+                        let _ = self.command(&format!("buffer {}", id + 1));
+                    }
+                    return false;
+                }
                 let result = if let Some(axis) = axis {
                     self.split(axis, Some(entry.path.clone()))
                 } else {
@@ -556,6 +678,9 @@ impl Workspace {
         false
     }
     pub fn paste(&mut self, text: &str) {
+        self.last_input = Instant::now();
+        self.editor_mut().completion = None;
+        self.editor_mut().popup = None;
         if let Some(p) = &mut self.picker {
             p.paste(text);
         } else {
@@ -650,6 +775,12 @@ mod tests {
         key(&mut w, 'X');
         w.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         w.command("make").unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while w.build.is_some() && Instant::now() < deadline {
+            w.poll();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(w.build.is_none());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "Xsource");
         assert!(w.editor().buffer.body().contains("test"));
         w.command("bprevious").unwrap();

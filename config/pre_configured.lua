@@ -57,6 +57,7 @@ vim.cmd.colorscheme('retrobox')
 fvim.workflow = {
     timeout_ms = 500,
     make = { 'make' },
+    fallback = { 'c', 'build', 'run' },
     exclude = { '.git', 'target', 'node_modules', '.cache', 'build' },
     max_files = 20000,
     max_bytes = 1048576,
@@ -91,3 +92,49 @@ fvim.filetype_options = {
     odin={tabstop=4, shiftwidth=4, expandtab=false},
     hlsl={tabstop=4, shiftwidth=4, expandtab=true},
 }
+
+-- Language tooling and diagnostic UI, matching xt9y/config/nvim.
+vim.opt.updatetime = 300
+vim.opt.autocomplete = true
+vim.opt.pumheight = 5
+fvim.tooling = {
+    syntax = true,
+    languages = { 'c', 'cpp', 'lua', 'zig', 'odin', 'bash', 'json', 'markdown', 'hlsl' },
+    servers = {
+        clangd = { cmd={'clangd', '--background-index'}, filetypes={'c','cpp','objc','objcpp'}, root_markers={'compile_commands.json','compile_flags.txt','.git'}, enabled=true },
+        zls = { cmd={'zls'}, filetypes={'zig'}, root_markers={'build.zig','zls.json','.git'}, enabled=true },
+        ols = { cmd={'ols'}, filetypes={'odin'}, root_markers={'ols.json','.git'}, enabled=true },
+        slangd = { cmd={'slangd'}, filetypes={'hlsl'}, root_markers={'slangd.json','.git'}, enabled=true },
+    },
+    diagnostics = {},
+}
+vim.diagnostic.config {
+    virtual_text={spacing=4, prefix='●'}, signs=true, underline=true,
+    update_in_insert=false, severity_sort=true, float={border='rounded',source='always'},
+}
+vim.filetype.add { extension={fx='hlsl',fxh='hlsl',usf='hlsl',ush='hlsl',json='json',md='markdown',sh='bash'} }
+vim.keymap.set('n','dd','diagnostics')
+vim.keymap.set('n','<leader>d','diagnostics')
+vim.keymap.set('n',']d','diagnostic_next')
+vim.keymap.set('n','[d','diagnostic_previous')
+vim.keymap.set('n','<leader>e','diagnostic_float')
+vim.keymap.set('n','K','hover')
+vim.keymap.set('n','gd','definition')
+vim.keymap.set('n','gr','references')
+local function native_highlight(group, values)
+    fvim.themes.retrobox.dark[group] = values
+    fvim.themes.retrobox.light[group] = values
+    vim.api.nvim_set_hl(0, group, values)
+end
+native_highlight('DiagnosticError',{fg='#fb4934',ctermfg=167})
+native_highlight('DiagnosticWarn',{fg='#fabd2f',ctermfg=214})
+native_highlight('DiagnosticInfo',{fg='#83a598',ctermfg=109})
+native_highlight('DiagnosticHint',{fg='#8ec07c',ctermfg=108})
+native_highlight('Comment',{fg='#928374',ctermfg=102,italic=true})
+native_highlight('String',{fg='#b8bb26',ctermfg=142})
+native_highlight('Number',{fg='#d3869b',ctermfg=175})
+native_highlight('Keyword',{fg='#fb4934',ctermfg=167,bold=true})
+native_highlight('Type',{fg='#fabd2f',ctermfg=214})
+native_highlight('Function',{fg='#8ec07c',ctermfg=108})
+
+fvim.comments.bash = fvim.comments.sh

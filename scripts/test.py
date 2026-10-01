@@ -223,7 +223,7 @@ def exercise_editor(send, expect, clear, path):
     send(b"\x1b")
     expect(b"\x1b[2 q")  # Adjacent ESC+character is an Alt key sequence in a terminal.
     clear()
-    send(b"gg0dd:set ts=5 sw=2 nosmartindent\r")
+    send(b"gg0D:set ts=5 sw=2 nosmartindent\r")
     expect(b"Configuration updated.")
     clear()
     send(b":lua vim.opt.tabstop=0\r")
@@ -306,6 +306,69 @@ def exercise_editor(send, expect, clear, path):
     clear()
     send(b":q\r")
     expect(b"workflow.hlsl")
+    language = path.parent / "language.c"
+    language.write_bytes(b"int main(void) { return 0; }")
+    clear()
+    send(b":e language.c\r")
+    expect(b"fixture LSP diagnostic")
+    clear()
+    send(b"gg04l")
+    expect("╭".encode())
+    clear()
+    send(b"K")
+    expect(b"fixture hover documentation")
+    clear()
+    send(b"dd")
+    expect(b"Diagnostics >")
+    expect(b"fixture LSP diagnostic")
+    clear()
+    send(b"\x1b")
+    expect(b"language.c")
+    clear()
+    send(b"gg0iX")
+    expect(b"fixture_completion")
+    clear()
+    send(b"\t\r\x13")
+    expect(b"Saved.")
+    expect_file(language, b"fixture_completionint main(void) { return 0; }")
+    clear()
+    send(b"\x1b")
+    expect(b"\x1b[2 q")
+    clear()
+    send(b"dd")
+    expect(b"fixture saved diagnostic")
+    clear()
+    send(b"\x1b")
+    expect(b"language.c")
+    clear()
+    send(b':make --flag "two words"\r')
+    expect(b'BUILD_ARGS: ["build", "run", "--flag", "two words"]')
+    expect(b"Build finished.")
+    clear()
+    send(b"dd")
+    expect(b"fixture compiler error")
+    clear()
+    send(b"\x1b")
+    expect(b"[Build]")
+    clear()
+    send(b":e language.c\r")
+    expect(b"language.c")
+    clear()
+    send(b":make --interactive\r")
+    expect(b"INPUT_PROMPT: ")
+    clear()
+    send(b"terminal input\r")
+    expect(b"INPUT_RECEIVED: terminal input")
+    expect(b"Build finished.")
+    clear()
+    send(b":e language.c\r")
+    expect(b"language.c")
+    clear()
+    send(b":make --wait\r")
+    expect(b"WAITING_FOR_CANCEL")
+    clear()
+    send(b"\x11")
+    expect(b"Build finished.")
     clear()
     send(b":e edited.txt\r")
     expect(b"edited.txt")
@@ -435,7 +498,7 @@ def windows_terminal_test(binary, root):
         check(k.GetExitCodeProcess(process.hProcess, c.byref(exit_code)))
         assert exit_code.value == 0
         assert path.read_bytes() == b"HELLO\nEARTH"
-        print("ConPTY: Vim modes, operators, visual selection, substitution, undo/redo and saving passed.")
+        print("ConPTY: Vim editing, native workflows, LSP completion/diagnostics and interactive builds passed.")
     finally:
         if process.hProcess:
             if k.WaitForSingleObject(process.hProcess, 0) != 0:
@@ -509,7 +572,7 @@ def _terminal_test(binary, root):
             attrs = termios.tcgetattr(master)
             assert attrs[3] & termios.ICANON
             assert attrs[3] & termios.ECHO
-        print("PTY: Vim modes, operators, visual selection, substitution, undo/redo and saving passed.")
+        print("PTY: Vim editing, native workflows, LSP completion/diagnostics and interactive builds passed.")
     finally:
         if process.poll() is None:
             process.kill()
@@ -522,6 +585,16 @@ def _terminal_test(binary, root):
 
 
 def terminal_test(binary, root):
+    import json
+    fixture = str(Path("tests/tool_fixture.py").resolve())
+    # Forward slashes keep the Lua literal portable on Windows.
+    python = sys.executable.replace("\\", "/")
+    fixture = fixture.replace("\\", "/")
+    config = root / "configuration/init.lua"
+    with config.open("a", encoding="utf-8") as stream:
+        stream.write("\nvim.lsp.config('clangd', {cmd={" + json.dumps(python) + "," + json.dumps(fixture) + "}})\n")
+        stream.write("vim.lsp.enable({'zls','ols','slangd'}, false)\n")
+        stream.write("fvim.workflow.fallback={" + json.dumps(python) + "," + json.dumps(fixture) + ",'--build','build','run'}\n")
     previous = os.environ.get("FVIM_CONFIG_DIR")
     os.environ["FVIM_CONFIG_DIR"] = str(root / "configuration")
     try:

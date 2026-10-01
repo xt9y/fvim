@@ -54,10 +54,41 @@ pub struct FileOptions {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct Server {
+    pub command: Vec<String>,
+    pub filetypes: Vec<String>,
+    pub root_markers: Vec<String>,
+    pub enabled: bool,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiagnosticOptions {
+    pub signs: bool,
+    pub underline: bool,
+    pub virtual_text: bool,
+    pub spacing: usize,
+    pub prefix: String,
+    pub update_in_insert: bool,
+    pub severity_sort: bool,
+    pub float: bool,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolSettings {
+    pub servers: HashMap<String, Server>,
+    pub syntax: bool,
+    pub languages: Vec<String>,
+    pub diagnostics: DiagnosticOptions,
+    pub completion: bool,
+    pub popup_height: usize,
+    pub delay_ms: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub keymaps: Vec<Keymap>,
     pub mapping_timeout: usize,
     pub make_command: Vec<String>,
+    pub fallback_command: Vec<String>,
+    pub tooling: ToolSettings,
     pub filetypes: HashMap<String, String>,
     pub comments: HashMap<String, (String, String, String)>,
     pub file_options: HashMap<String, FileOptions>,
@@ -68,6 +99,7 @@ pub struct Settings {
     pub relativenumber: bool,
     pub numberwidth: usize,
     pub signcolumn: bool,
+    pub sign_auto: bool,
     pub tabstop: usize,
     pub shiftwidth: usize,
     pub expandtab: bool,
@@ -146,7 +178,7 @@ pub struct Config {
 
 const API: &str = r#"
 fvim = { _options = {}, cursor = {}, themes = {}, highlights = {}, keymaps = {},
-    filetypes = {}, comments = {}, filetype_options = {}, workflow = {} }
+    filetypes = {}, comments = {}, filetype_options = {}, workflow = {}, tooling = {servers={}, diagnostics={}} }
 local options = setmetatable({}, {
     __index = function(_, key) return fvim._options[key] end,
     __newindex = function(_, key, value)
@@ -169,6 +201,22 @@ function vim.keymap.del(mode, lhs) fvim.keymaps[mode..':'..lhs] = nil end
 vim.filetype = {}
 function vim.filetype.add(spec)
     for ext, name in pairs(spec.extension or {}) do fvim.filetypes[ext] = name end
+end
+vim.diagnostic = {}
+function vim.diagnostic.config(options)
+    for key,value in pairs(options) do fvim.tooling.diagnostics[key]=value end
+end
+vim.lsp = {}
+function vim.lsp.config(name, options)
+    local server=fvim.tooling.servers[name] or {}
+    for key,value in pairs(options) do server[key]=value end
+    fvim.tooling.servers[name]=server
+end
+function vim.lsp.enable(names, enabled)
+    if type(names)=='string' then names={names} end
+    for _,name in ipairs(names) do
+        assert(fvim.tooling.servers[name], 'Unknown LSP server: '..name).enabled=enabled~=false
+    end
 end
 local original_fvim, original_vim = fvim, vim
 local function copy(t, seen)
@@ -193,7 +241,7 @@ function fvim._snapshot()
     return copy({ opt=fvim._options, cursor=fvim.cursor, themes=fvim.themes,
         highlights=fvim.highlights, output_buffer_size=fvim.output_buffer_size, g=vim.g,
         keymaps=fvim.keymaps, filetypes=fvim.filetypes, comments=fvim.comments,
-        filetype_options=fvim.filetype_options, workflow=fvim.workflow })
+        filetype_options=fvim.filetype_options, workflow=fvim.workflow, tooling=fvim.tooling })
 end
 function fvim._restore(s)
     fvim, vim = original_fvim, original_vim
@@ -202,7 +250,7 @@ function fvim._restore(s)
     fvim.cursor, fvim.themes, fvim.highlights = s.cursor, s.themes, s.highlights
     fvim.output_buffer_size, vim.g = s.output_buffer_size, s.g
     fvim.keymaps, fvim.filetypes, fvim.comments = s.keymaps, s.filetypes, s.comments
-    fvim.filetype_options, fvim.workflow = s.filetype_options, s.workflow
+    fvim.filetype_options, fvim.workflow, fvim.tooling = s.filetype_options, s.workflow, s.tooling
 end
 "#;
 
@@ -305,6 +353,11 @@ impl Config {
         let lua = Lua::new();
         exec(&lua, API, "fvim API")?;
         exec(&lua, DEFAULTS, "shipped pre_configured.lua")?;
+        exec(
+            &lua,
+            "fvim._shipped_workflow=fvim.workflow",
+            "shipped workflow",
+        )?;
         exec(&lua, defaults, "pre_configured.lua")?;
         read_settings(&lua).map_err(|e| format!("pre_configured.lua: {e}"))?;
         exec(&lua, init, "init.lua")?;
@@ -353,6 +406,9 @@ fn read_settings(lua: &Lua) -> Result<Settings, String> {
     let f: Table = get(&lua.globals(), "fvim")?;
     let opt: Table = get(&f, "_options")?;
     let known = [
+        "updatetime",
+        "autocomplete",
+        "pumheight",
         "number",
         "relativenumber",
         "numberwidth",
@@ -389,6 +445,7 @@ fn read_settings(lua: &Lua) -> Result<Settings, String> {
         "wrap",
         "linebreak",
         "showmode",
+        "autocomplete",
     ] {
         if !matches!(get::<Value>(&opt, key)?, Value::Boolean(_)) {
             return Err(format!("{key} must be a boolean"));
@@ -470,6 +527,13 @@ fn read_settings(lua: &Lua) -> Result<Settings, String> {
                 | "blockcomment"
                 | "bnext"
                 | "bprevious"
+                | "diagnostics"
+                | "diagnostic_next"
+                | "diagnostic_previous"
+                | "diagnostic_float"
+                | "hover"
+                | "definition"
+                | "references"
         ) {
             return Err(format!("Unsupported native keymap action: {action}"));
         }
@@ -543,7 +607,76 @@ fn read_settings(lua: &Lua) -> Result<Settings, String> {
             Ok(n)
         }
     };
+    let fallback_command = workflow
+        .get::<Option<Vec<String>>>("fallback")
+        .map_err(|e| e.to_string())?
+        .unwrap_or(get(&get::<Table>(&f, "_shipped_workflow")?, "fallback")?);
+    if fallback_command.is_empty() || fallback_command[0].is_empty() {
+        return Err("workflow.fallback needs an executable".into());
+    }
+    fn boolean(table: &Table, key: &str) -> Result<bool, String> {
+        match get::<Value>(table, key)? {
+            Value::Boolean(value) => Ok(value),
+            _ => Err(format!("{key} must be a boolean")),
+        }
+    }
+    let tools: Table = get(&f, "tooling")?;
+    let d: Table = get(&tools, "diagnostics")?;
+    let virtual_value: Value = get(&d, "virtual_text")?;
+    let (virtual_text, spacing, prefix) = match virtual_value {
+        Value::Boolean(false) => (false, 0, String::new()),
+        Value::Table(t) => (
+            true,
+            number(&t, "spacing", 0, 100)?,
+            get::<String>(&t, "prefix")?,
+        ),
+        _ => return Err("diagnostics.virtual_text must be false or a table".into()),
+    };
+    if prefix.chars().any(char::is_control) {
+        return Err("Invalid diagnostic prefix".into());
+    }
+    let mut servers = HashMap::new();
+    for item in get::<Table>(&tools, "servers")?.pairs::<String, Table>() {
+        let (name, t) = item.map_err(|e| e.to_string())?;
+        let command: Vec<String> = get(&t, "cmd")?;
+        if command.is_empty() || command[0].is_empty() {
+            return Err(format!("{name} needs a server command"));
+        }
+        servers.insert(
+            name,
+            Server {
+                command,
+                filetypes: get(&t, "filetypes")?,
+                root_markers: get(&t, "root_markers")?,
+                enabled: boolean(&t, "enabled")?,
+            },
+        );
+    }
+    let tooling = ToolSettings {
+        servers,
+        syntax: boolean(&tools, "syntax")?,
+        languages: get(&tools, "languages")?,
+        completion: get(&opt, "autocomplete")?,
+        popup_height: number(&opt, "pumheight", 1, 100)?,
+        delay_ms: number(&opt, "updatetime", 1, 10000)?,
+        diagnostics: DiagnosticOptions {
+            signs: boolean(&d, "signs")?,
+            underline: boolean(&d, "underline")?,
+            virtual_text,
+            spacing,
+            prefix,
+            update_in_insert: boolean(&d, "update_in_insert")?,
+            severity_sort: boolean(&d, "severity_sort")?,
+            float: match get::<Value>(&d, "float")? {
+                Value::Boolean(value) => value,
+                Value::Table(_) => true,
+                _ => return Err("diagnostics.float must be a boolean or table".into()),
+            },
+        },
+    };
     Ok(Settings {
+        tooling,
+        fallback_command,
         keymaps,
         filetypes,
         comments,
@@ -557,6 +690,7 @@ fn read_settings(lua: &Lua) -> Result<Settings, String> {
         relativenumber: get(&opt, "relativenumber")?,
         numberwidth: number(&opt, "numberwidth", 1, 20)?,
         signcolumn: sign == "yes",
+        sign_auto: sign == "auto",
         tabstop: number(&opt, "tabstop", 1, 256)?,
         shiftwidth: number(&opt, "shiftwidth", 0, 256)?,
         expandtab: get(&opt, "expandtab")?,
@@ -690,6 +824,9 @@ mod tests {
             "vim.opt.number = nil",
             "vim.opt.wrap = nil",
             "vim.opt.tabstop = 0",
+            "vim.opt.autocomplete = 3",
+            "fvim.tooling.syntax = 'yes'",
+            "vim.diagnostic.config { signs = 1 }",
             "vim.opt.tabstop = 2.5",
             "vim.opt.statusline = '%z'",
             "vim.opt.sidescrolloff = -1",

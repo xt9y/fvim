@@ -208,7 +208,14 @@ impl Editor {
         let name = name.trim_end_matches('!');
         if matches!(
             name,
-            "split"
+            "diagnostics"
+                | "diagnostic_next"
+                | "diagnostic_previous"
+                | "diagnostic_float"
+                | "hover"
+                | "definition"
+                | "references"
+                | "split"
                 | "sp"
                 | "vsplit"
                 | "vs"

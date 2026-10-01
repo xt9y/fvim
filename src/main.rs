@@ -1,6 +1,7 @@
 mod buffer;
 mod command;
 mod config;
+mod diagnostics;
 mod editor;
 mod install;
 mod motion;
@@ -8,6 +9,8 @@ mod motion;
 mod performance;
 mod picker;
 mod renderer;
+mod syntax;
+mod tooling;
 mod workspace;
 
 use buffer::Buffer;
@@ -23,7 +26,7 @@ use crossterm::{
 };
 use renderer::Renderer;
 use std::env;
-use std::io::{self, BufWriter, IsTerminal};
+use std::io::{self, BufWriter, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use workspace::Workspace;
@@ -72,8 +75,34 @@ fn edit(path: Option<PathBuf>) -> io::Result<()> {
     let mut out =
         BufWriter::with_capacity(workspace.settings.output_buffer_size, io::stdout().lock());
     let mut redraw = true;
+    let mut building = false;
     loop {
-        if redraw {
+        if workspace.build.is_some() && !building {
+            out.flush()?;
+            execute!(
+                out,
+                ResetColor,
+                SetAttribute(Attribute::Reset),
+                LeaveAlternateScreen,
+                DisableBracketedPaste,
+                Show
+            )?;
+            out.flush()?;
+            building = true;
+        }
+        redraw |= workspace.poll();
+        if building {
+            out.write_all(std::mem::take(&mut workspace.terminal_output).as_bytes())?;
+            out.flush()?;
+            if workspace.build.is_none() {
+                execute!(out, EnterAlternateScreen, EnableBracketedPaste, Hide)?;
+                out.flush()?;
+                renderer.invalidate();
+                building = false;
+                redraw = true;
+            }
+        }
+        if redraw && !building {
             let size = terminal::size()?;
             renderer.draw_workspace(&mut workspace, size, &mut out)?;
         }
@@ -86,7 +115,29 @@ fn edit(path: Option<PathBuf>) -> io::Result<()> {
             redraw = pending || workspace.picker.as_mut().is_some_and(|p| p.poll());
             continue;
         }
-        match event::read()? {
+        let input = event::read()?;
+        if building {
+            if let Some(build) = &mut workspace.build {
+                match input {
+                    Event::Key(key) if key.kind != KeyEventKind::Release => {
+                        if key.code == KeyCode::Char('q')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            build.cancel();
+                        } else {
+                            let _ = build.input(&terminal_key(key));
+                        }
+                    }
+                    Event::Paste(text) => {
+                        let _ = build.input(text.as_bytes());
+                    }
+                    Event::Resize(cols, rows) => build.resize(cols, rows),
+                    _ => {}
+                }
+            }
+            continue;
+        }
+        match input {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 if key.code == KeyCode::Char('l') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     renderer.invalidate();
@@ -117,6 +168,44 @@ fn edit(path: Option<PathBuf>) -> io::Result<()> {
             _ => redraw = false,
         }
     }
+}
+
+fn terminal_key(key: crossterm::event::KeyEvent) -> Vec<u8> {
+    let text = match key.code {
+        KeyCode::Char(ch) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let ch = ch.to_ascii_lowercase();
+            if ch == ' ' {
+                "\0".into()
+            } else if ('@'..='_').contains(&ch) || ch.is_ascii_lowercase() {
+                return vec![(ch as u8) & 0x1f];
+            } else {
+                String::new()
+            }
+        }
+        KeyCode::Char(ch) => ch.to_string(),
+        KeyCode::Enter => "\r".into(),
+        KeyCode::Backspace => "\x7f".into(),
+        KeyCode::Tab => "\t".into(),
+        KeyCode::BackTab => "\x1b[Z".into(),
+        KeyCode::Esc => "\x1b".into(),
+        KeyCode::Null => "\0".into(),
+        KeyCode::Up => "\x1b[A".into(),
+        KeyCode::Down => "\x1b[B".into(),
+        KeyCode::Right => "\x1b[C".into(),
+        KeyCode::Left => "\x1b[D".into(),
+        KeyCode::Home => "\x1b[H".into(),
+        KeyCode::End => "\x1b[F".into(),
+        KeyCode::Delete => "\x1b[3~".into(),
+        KeyCode::Insert => "\x1b[2~".into(),
+        KeyCode::PageUp => "\x1b[5~".into(),
+        KeyCode::PageDown => "\x1b[6~".into(),
+        _ => String::new(),
+    };
+    let mut bytes = text.into_bytes();
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        bytes.insert(0, 0x1b);
+    }
+    bytes
 }
 
 fn run() -> io::Result<()> {

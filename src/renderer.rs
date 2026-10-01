@@ -141,7 +141,14 @@ impl Renderer {
         } else {
             0
         };
-        let signs = if s.signcolumn { 2 } else { 0 };
+        let show_diagnostics = true;
+        let signs = if s.signcolumn
+            || (s.sign_auto && show_diagnostics && !editor.diagnostics.is_empty())
+        {
+            2
+        } else {
+            0
+        };
         let gutter = (number_width + signs).min(columns.saturating_sub(1));
         let text_width = columns - gutter;
         let column = display_column(&b.lines[b.row], b.col, s.tabstop);
@@ -239,7 +246,20 @@ impl Renderer {
             let mut line = Line::default();
             if let Some(text) = b.lines.get(row) {
                 if signs > 0 {
-                    line.add(&" ".repeat(signs.min(gutter)), s.highlight("SignColumn"));
+                    if let Some(d) = editor
+                        .diagnostics
+                        .iter()
+                        .filter(|d| d.row == row)
+                        .min_by_key(|d| d.severity)
+                        .filter(|_| show_diagnostics && s.tooling.diagnostics.signs)
+                    {
+                        line.add(
+                            &clipped(&format!("{} ", d.sign()), signs.min(gutter)),
+                            s.highlight(d.group()),
+                        );
+                    } else {
+                        line.add(&" ".repeat(signs.min(gutter)), s.highlight("SignColumn"));
+                    }
                 }
                 if number_width > 0 && gutter > signs {
                     let number = if segment > 0 {
@@ -268,15 +288,59 @@ impl Renderer {
                 if text.is_empty() && editor.selected(row, 0) {
                     line.add(" ", visual);
                 } else {
-                    line.append(Line::visible(
+                    line.append(Line::styled_visible(
                         text,
                         left,
                         visible_width,
                         s.tabstop,
-                        normal,
-                        visual,
-                        |col| editor.selected(row, col),
+                        |col| {
+                            let first = editor.syntax.partition_point(|span| span.row < row);
+                            let mut style = editor.syntax[first..]
+                                .iter()
+                                .take_while(|span| span.row == row)
+                                .find(|span| span.start <= col && col < span.end)
+                                .map_or(normal, |span| s.highlight(span.group));
+                            if show_diagnostics && s.tooling.diagnostics.underline {
+                                if let Some(d) =
+                                    editor.diagnostics.iter().find(|d| d.contains(row, col))
+                                {
+                                    let diagnostic = s.highlight(d.group());
+                                    style.fg = diagnostic.fg;
+                                    style.ctermfg = diagnostic.ctermfg;
+                                    style.underline = true;
+                                }
+                            }
+                            if editor.selected(row, col) {
+                                style = visual.over(style);
+                            }
+                            style
+                        },
                     ));
+                }
+                if show_diagnostics && s.tooling.diagnostics.virtual_text {
+                    if let Some(d) = editor
+                        .diagnostics
+                        .iter()
+                        .filter(|d| d.row == row)
+                        .min_by_key(|d| d.severity)
+                    {
+                        let cells = unicode_width::UnicodeWidthStr::width(line.text.as_str());
+                        let text = format!(
+                            "{}{} {}",
+                            " ".repeat(s.tooling.diagnostics.spacing),
+                            s.tooling.diagnostics.prefix,
+                            d.message
+                        );
+                        line.append(Line::visible(
+                            &text,
+                            0,
+                            columns.saturating_sub(cells),
+                            s.tabstop,
+                            s.highlight(d.group()),
+                            normal,
+                            |_| false,
+                        ));
+                    }
                 }
                 if s.wrap && segment + 1 < chunks.len() {
                     segment += 1;
@@ -316,12 +380,6 @@ impl Renderer {
                 frame.push(Line::default());
             }
         }
-        self.changed.clear();
-        for (row, line) in frame.iter().enumerate() {
-            if clear || self.lines.get(row) != Some(line) {
-                self.changed.push(row);
-            }
-        }
         let (x, y) = if let Some(p) = editor.prompt.as_ref().filter(|_| !pane) {
             (
                 display_column(
@@ -338,6 +396,13 @@ impl Renderer {
                 cursor_y.min(usize::from(height) - 1),
             )
         };
+        overlays(editor, &mut frame, (x, y), columns, usize::from(height));
+        self.changed.clear();
+        for (row, line) in frame.iter().enumerate() {
+            if clear || self.lines.get(row) != Some(line) {
+                self.changed.push(row);
+            }
+        }
         let cursor = (x as u16, y as u16, editor.mode == Mode::Insert);
         let shape = if cursor.2 {
             &s.insert_cursor
@@ -406,6 +471,7 @@ impl Renderer {
             let e = &mut workspace.buffers[w.buffer];
             let position = (e.buffer.row, e.buffer.col);
             let mode = e.mode;
+            let popup = if id != active { e.popup.take() } else { None };
             let (row, col) = if id == active { saved } else { (w.row, w.col) };
             e.buffer.row = row.min(e.buffer.lines.len() - 1);
             e.buffer.col = col.min(
@@ -445,6 +511,9 @@ impl Renderer {
             e.buffer.row = position.0;
             e.buffer.col = position.1;
             e.mode = mode;
+            if id != active {
+                e.popup = popup;
+            }
         }
         workspace.buffers[active_buffer].page_rows = active_rows;
         workspace.buffers[active_buffer].buffer.row = saved.0;
@@ -481,7 +550,7 @@ impl Renderer {
             );
         }
         if let Some(p) = &workspace.picker {
-            let title = format!("{} > {}", if p.grep { "Grep" } else { "Files" }, p.query);
+            let title = format!("{} > {}", p.title.as_str(), p.query);
             frame[0] = Line::visible(
                 &title,
                 0,
@@ -512,6 +581,19 @@ impl Renderer {
                     workspace.settings.tabstop,
                     if top + row == p.selected {
                         workspace.settings.highlight("Visual")
+                    } else if p.title == "Diagnostics" {
+                        workspace.settings.highlight(
+                            match p
+                                .entries
+                                .get(top + row)
+                                .and_then(|e| e.label.chars().next())
+                            {
+                                Some('E') => "DiagnosticError",
+                                Some('W') => "DiagnosticWarn",
+                                Some('I') => "DiagnosticInfo",
+                                _ => "DiagnosticHint",
+                            },
+                        )
                     } else {
                         normal
                     },
@@ -615,11 +697,130 @@ impl Renderer {
         out.flush()
     }
 }
+fn overlays(
+    editor: &Editor,
+    frame: &mut [Line],
+    cursor: (usize, usize),
+    width: usize,
+    height: usize,
+) {
+    let s = &editor.settings;
+    let (items, rounded) = if let Some(menu) = editor
+        .completion
+        .as_ref()
+        .filter(|_| editor.mode == Mode::Insert)
+    {
+        (
+            menu.items
+                .iter()
+                .enumerate()
+                .skip(
+                    menu.selected
+                        .unwrap_or(0)
+                        .saturating_sub(s.tooling.popup_height - 1),
+                )
+                .take(s.tooling.popup_height)
+                .map(|(i, item)| {
+                    format!(
+                        "{} {}",
+                        if menu.selected == Some(i) { ">" } else { " " },
+                        item.label
+                    )
+                })
+                .collect::<Vec<_>>(),
+            false,
+        )
+    } else if let Some(lines) = editor
+        .popup
+        .as_ref()
+        .filter(|_| editor.mode == Mode::Normal)
+    {
+        (lines.clone(), true)
+    } else {
+        return;
+    };
+    if width < 3 || height < 3 || items.is_empty() {
+        return;
+    }
+    let popup_width = items
+        .iter()
+        .map(|line| unicode_width::UnicodeWidthStr::width(line.as_str()))
+        .max()
+        .unwrap_or(1)
+        .saturating_add(2)
+        .min(width);
+    let count = items
+        .len()
+        .min(height.saturating_sub(if rounded { 2 } else { 0 }));
+    let popup_height = count + if rounded { 2 } else { 0 };
+    let x = cursor.0.min(width - popup_width);
+    let y = if cursor.1 + 1 + popup_height <= height {
+        cursor.1 + 1
+    } else {
+        cursor.1.saturating_sub(popup_height)
+    };
+    let style = s.highlight("StatusLine");
+    let mut rows = vec![];
+    if rounded {
+        rows.push(format!("╭{}╮", "─".repeat(popup_width - 2)));
+    }
+    for item in items.iter().take(count) {
+        let text = text::clipped(item, popup_width - 2);
+        let pad = popup_width - 2 - unicode_width::UnicodeWidthStr::width(text.as_str());
+        rows.push(format!(
+            "{}{}{}{}",
+            if rounded { "│" } else { " " },
+            text,
+            " ".repeat(pad),
+            if rounded { "│" } else { " " }
+        ));
+    }
+    if rounded {
+        rows.push(format!("╰{}╯", "─".repeat(popup_width - 2)));
+    }
+    for (offset, text) in rows.iter().enumerate() {
+        if let Some(line) = frame.get_mut(y + offset) {
+            let mut new = line.crop(0, x, s.tabstop);
+            let cells = unicode_width::UnicodeWidthStr::width(new.text.as_str());
+            new.add(&" ".repeat(x.saturating_sub(cells)), s.highlight("Normal"));
+            new.add(text, style);
+            new.append(line.crop(x + popup_width, width - x - popup_width, s.tabstop));
+            *line = new;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::buffer::Buffer;
     use crate::editor::{Editor, Mode, Visual};
+
+    #[test]
+    fn diagnostics_use_severity_signs_underlines_virtual_text_and_rounded_popup() {
+        let mut e = Editor::new(Buffer::from_text("broken"));
+        e.diagnostics.push(crate::diagnostics::Diagnostic {
+            path: None,
+            row: 0,
+            col: 1,
+            end_row: 0,
+            end_col: 4,
+            severity: 1,
+            source: "clangd".into(),
+            message: "unknown name".into(),
+        });
+        let mut r = Renderer::default();
+        r.prepare(&e, (60, 10));
+        assert!(r.lines[0].text.contains("E"));
+        assert!(r.lines[0].text.contains("● unknown name"));
+        assert!(r.lines[0].spans.iter().any(|(_, s)| s.underline));
+        e.popup = Some(vec!["[clangd] unknown name".into()]);
+        r.prepare(&e, (60, 10));
+        assert!(r.lines.iter().any(|l| l.text.contains('╭')));
+        e.mode = Mode::Insert;
+        r.prepare(&e, (60, 10));
+        assert!(r.lines[0].text.contains("●"));
+    }
 
     #[test]
     fn paging_uses_the_active_panes_height() {
@@ -667,6 +868,29 @@ mod tests {
         assert!(output.is_empty());
     }
 
+    #[test]
+    fn completion_scrolls_to_selected_items_beyond_popup_height() {
+        let mut e = Editor::new(Buffer::from_text("x"));
+        e.mode = Mode::Insert;
+        e.completion = Some(crate::editor::CompletionMenu {
+            items: (0..12)
+                .map(|i| crate::editor::Completion {
+                    label: format!("candidate{i}"),
+                    text: "".into(),
+                    start: (0, 0),
+                    end: (0, 0),
+                    additional: vec![],
+                })
+                .collect(),
+            selected: Some(8),
+        });
+        let mut r = Renderer::default();
+        r.prepare(&e, (60, 20));
+        assert!(r
+            .lines
+            .iter()
+            .any(|line| line.text.contains("> candidate8")));
+    }
     #[test]
     fn native_layout_uses_gutters_full_statusline_and_command_area() {
         let mut e = Editor::new(Buffer::from_text("alpha\nbeta\ngamma"));

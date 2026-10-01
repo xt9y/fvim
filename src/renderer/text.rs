@@ -47,6 +47,22 @@ impl Line {
         visual: Highlight,
         selected: impl Fn(usize) -> bool,
     ) -> Self {
+        Self::styled_visible(line, left, width, tabstop, |index| {
+            if selected(index) {
+                visual
+            } else {
+                normal
+            }
+        })
+    }
+
+    pub(super) fn styled_visible(
+        line: &str,
+        left: usize,
+        width: usize,
+        tabstop: usize,
+        style_at: impl Fn(usize) -> Highlight,
+    ) -> Self {
         let mut out = Self::default();
         let mut column = 0;
         let right = left.saturating_add(width);
@@ -59,7 +75,7 @@ impl Line {
                 end > left && column < right
             };
             if visible {
-                let style = if selected(index) { visual } else { normal };
+                let style = style_at(index);
                 if size == 0 || (column >= left && end <= right && ch != '\t') {
                     let mut bytes = [0; 4];
                     out.add(
@@ -84,6 +100,20 @@ impl Line {
         out
     }
 
+    pub(super) fn crop(&self, left: usize, width: usize, tabstop: usize) -> Self {
+        Self::styled_visible(&self.text, left, width, tabstop, |index| {
+            let byte = self
+                .text
+                .char_indices()
+                .nth(index)
+                .map_or(self.text.len(), |p| p.0);
+            self.spans
+                .iter()
+                .rev()
+                .find(|(start, _)| *start <= byte)
+                .map_or(Highlight::default(), |(_, s)| *s)
+        })
+    }
     pub(super) fn append(&mut self, other: Self) {
         let offset = self.text.len();
         for (start, style) in other.spans {

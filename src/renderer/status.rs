@@ -8,13 +8,13 @@ pub(super) fn statusline(editor: &Editor, width: usize) -> String {
         .path
         .as_ref()
         .map(|p| p.to_string_lossy())
-        .unwrap_or_else(|| "[No Name]".into());
+        .unwrap_or_else(|| editor.title.as_deref().unwrap_or("[No Name]").into());
     let filename = b
         .path
         .as_ref()
         .and_then(|p| p.file_name())
         .map(|p| p.to_string_lossy())
-        .unwrap_or_else(|| "[No Name]".into());
+        .unwrap_or_else(|| editor.title.as_deref().unwrap_or("[No Name]").into());
     let mut left = String::new();
     let mut right = String::new();
     let mut align = false;
