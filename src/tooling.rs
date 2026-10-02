@@ -14,47 +14,6 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-pub fn normalized_path(path: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        let raw = path.to_string_lossy();
-        if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
-            return PathBuf::from(format!(r"\\{rest}"));
-        }
-        if let Some(rest) = raw.strip_prefix(r"\\?\") {
-            return PathBuf::from(rest);
-        }
-    }
-    path.to_owned()
-}
-
-pub fn same_path(a: &Path, b: &Path) -> bool {
-    let a = normalized_path(a);
-    let b = normalized_path(b);
-    #[cfg(windows)]
-    {
-        return a
-            .to_string_lossy()
-            .eq_ignore_ascii_case(&b.to_string_lossy());
-    }
-    #[cfg(not(windows))]
-    {
-        a == b
-    }
-}
-
-pub fn path_key(path: &Path) -> String {
-    let key = uri(&normalized_path(path));
-    #[cfg(windows)]
-    {
-        key.to_ascii_lowercase()
-    }
-    #[cfg(not(windows))]
-    {
-        key
-    }
-}
-
 pub fn uri(path: &Path) -> String {
     let path = if path.is_absolute() {
         path.to_owned()
@@ -1089,30 +1048,6 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn lexical_path_normalization_preserves_platform_identity_without_io() {
-        let plain = PathBuf::from(if cfg!(windows) {
-            r"C:\repo\file.c"
-        } else {
-            "/repo/file.c"
-        });
-        assert!(same_path(&plain, &plain));
-        assert_eq!(path_key(&plain), path_key(&normalized_path(&plain)));
-        #[cfg(windows)]
-        {
-            assert_eq!(normalized_path(Path::new(r"\\?\C:\repo\file.c")), plain);
-            assert_eq!(
-                path_key(Path::new(r"\\?\C:\repo\file.c")),
-                path_key(Path::new(r"C:\repo\file.c"))
-            );
-            assert!(same_path(Path::new(r"\\?\C:\Repo\FILE.c"), &plain));
-            assert_eq!(
-                normalized_path(Path::new(r"\\?\UNC\server\share\file.c")),
-                PathBuf::from(r"\\server\share\file.c")
-            );
-        }
-    }
-
     #[test]
     fn incremental_change_sends_only_the_changed_utf16_range() {
         assert_eq!(
