@@ -5,6 +5,17 @@ use crate::{
 };
 use serde_json::Value;
 
+fn has_completion_prefix(editor: &Editor) -> bool {
+    if editor.mode != Mode::Insert || editor.buffer.col == 0 {
+        return false;
+    }
+    editor.buffer.lines[editor.buffer.row]
+        .chars()
+        .nth(editor.buffer.col - 1)
+        .is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+}
+
+
 impl Workspace {
     pub(super) fn diagnostic_entries(&self) -> Vec<crate::picker::Entry> {
         let mut items: Vec<_> = self.diagnostics.values().flatten().collect();
@@ -159,11 +170,7 @@ impl Workspace {
                 version: self.tool_version,
                 text: e.buffer.text().replace("\r\n", "\n"),
                 filetype: self.settings.filetype(Some(path)),
-                cursor: if e.mode == Mode::Insert {
-                    Some((e.buffer.row, e.buffer.col))
-                } else {
-                    None
-                },
+                cursor: has_completion_prefix(e).then_some((e.buffer.row, e.buffer.col)),
             });
             if self.saved_generations.get(&id).copied().unwrap_or(0) != e.buffer.save_generation {
                 self.tools.saved(path.clone());
@@ -266,7 +273,9 @@ impl Workspace {
                         continue;
                     }
                     match method.as_str() {
-                        "textDocument/completion" if e.mode == Mode::Insert => {
+                        "textDocument/completion"
+                            if e.mode == Mode::Insert && has_completion_prefix(e) =>
+                        {
                             let items = completion_items(e, &value, row, col);
                             if !items.is_empty() {
                                 self.editor_mut().completion = Some(CompletionMenu {
@@ -782,6 +791,28 @@ mod tests {
         w.key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
         assert!(w.editor().completion.is_none());
         assert_eq!(w.editor().buffer.row, 1);
+    }
+
+    #[test]
+    fn automatic_completion_requires_a_typed_identifier_character() {
+        let mut e = Editor::new(Buffer::from_text(""));
+        e.mode = Mode::Insert;
+        assert!(!has_completion_prefix(&e));
+
+        e.buffer.lines[0] = " ".into();
+        e.buffer.col = 1;
+        assert!(!has_completion_prefix(&e));
+
+        e.buffer.lines[0] = "x".into();
+        assert!(has_completion_prefix(&e));
+
+        e.buffer.lines[0] = "call(".into();
+        e.buffer.col = 5;
+        assert!(!has_completion_prefix(&e));
+
+        e.buffer.lines[0] = "call(a".into();
+        e.buffer.col = 6;
+        assert!(has_completion_prefix(&e));
     }
 
     #[test]
