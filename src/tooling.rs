@@ -44,10 +44,15 @@ pub fn same_path(a: &Path, b: &Path) -> bool {
 }
 
 pub fn path_key(path: &Path) -> String {
-    let mut key = uri(&normalized_path(path));
+    let key = uri(&normalized_path(path));
     #[cfg(windows)]
-    key.make_ascii_lowercase();
-    key
+    {
+        key.to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        key
+    }
 }
 
 pub fn uri(path: &Path) -> String {
