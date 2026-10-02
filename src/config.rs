@@ -860,11 +860,9 @@ mod tests {
         let c = Config::from_scripts(old, "").unwrap();
         let gcc = parse_keys("gcc").unwrap();
         let gbc = parse_keys("gbc").unwrap();
-        assert!(c
-            .settings
-            .keymaps
-            .iter()
-            .any(|mapping| mapping.mode == "v" && mapping.keys == gcc && mapping.action == "comment"));
+        assert!(c.settings.keymaps.iter().any(|mapping| mapping.mode == "v"
+            && mapping.keys == gcc
+            && mapping.action == "comment"));
         assert!(c.settings.keymaps.iter().any(|mapping| {
             mapping.mode == "v" && mapping.keys == gbc && mapping.action == "blockcomment"
         }));
