@@ -359,10 +359,15 @@ impl Config {
         exec(&lua, DEFAULTS, "shipped pre_configured.lua")?;
         exec(
             &lua,
-            "fvim._shipped_workflow=fvim.workflow; fvim._native_highlights={}; for group,values in pairs(fvim.highlights) do if group:match('Diagnostic') or group=='Comment' or group=='String' or group=='Number' or group=='Keyword' or group=='Type' or group=='Function' or group=='Variable' or group=='Property' or group=='Constant' or group=='SnippetPlaceholder' or group=='SnippetPlaceholderActive' then fvim._native_highlights[group]=values end end",
+            "local shipped=fvim._snapshot(); fvim._shipped_workflow=shipped.workflow; fvim._shipped_keymaps=shipped.keymaps; fvim._shipped_comments=shipped.comments; fvim._native_highlights={}; for group,values in pairs(fvim.highlights) do if group:match('Diagnostic') or group=='Comment' or group=='String' or group=='Number' or group=='Keyword' or group=='Type' or group=='Function' or group=='Variable' or group=='Property' or group=='Constant' or group=='SnippetPlaceholder' or group=='SnippetPlaceholderActive' then fvim._native_highlights[group]=values end end",
             "shipped workflow",
         )?;
         exec(&lua, defaults, "pre_configured.lua")?;
+        exec(
+            &lua,
+            "for key,value in pairs(fvim._shipped_keymaps) do if fvim.keymaps[key]==nil then fvim.keymaps[key]=value end end; for filetype,value in pairs(fvim._shipped_comments) do if fvim.comments[filetype]==nil then fvim.comments[filetype]=value end end",
+            "native compatibility defaults",
+        )?;
         read_settings(&lua).map_err(|e| format!("pre_configured.lua: {e}"))?;
         exec(&lua, init, "init.lua")?;
         let settings = read_settings(&lua).map_err(|e| format!("init.lua: {e}"))?;
@@ -847,6 +852,39 @@ mod tests {
                 "Accepted: {script}"
             );
         }
+    }
+
+    #[test]
+    fn older_installed_defaults_inherit_visual_comment_mappings_and_comment_syntax() {
+        let old = "fvim.keymaps={}; fvim.comments={}; vim.opt.number=true";
+        let c = Config::from_scripts(old, "").unwrap();
+        let gcc = parse_keys("gcc").unwrap();
+        let gbc = parse_keys("gbc").unwrap();
+        assert!(c
+            .settings
+            .keymaps
+            .iter()
+            .any(|mapping| mapping.mode == "v" && mapping.keys == gcc && mapping.action == "comment"));
+        assert!(c.settings.keymaps.iter().any(|mapping| {
+            mapping.mode == "v" && mapping.keys == gbc && mapping.action == "blockcomment"
+        }));
+        assert_eq!(c.settings.comments.get("c").unwrap().0, "//");
+
+        let c = Config::from_scripts(
+            old,
+            "vim.keymap.del('v','gcc'); vim.keymap.set('v','gc','comment')",
+        )
+        .unwrap();
+        assert!(!c
+            .settings
+            .keymaps
+            .iter()
+            .any(|mapping| mapping.mode == "v" && mapping.keys == gcc));
+        assert!(c
+            .settings
+            .keymaps
+            .iter()
+            .any(|mapping| mapping.mode == "v" && mapping.keys == parse_keys("gc").unwrap()));
     }
 
     #[test]
