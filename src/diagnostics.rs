@@ -1,4 +1,6 @@
 use crate::config::Settings;
+#[cfg(windows)]
+use std::time::{Duration, Instant};
 use std::{
     io::Write,
     path::{Path, PathBuf},
@@ -197,6 +199,8 @@ pub struct Build {
     inherited_cursor: bool,
     #[cfg(windows)]
     cursor_pending: String,
+    #[cfg(windows)]
+    exit_drain_deadline: Option<Instant>,
 }
 impl Build {
     pub fn start(root: &Path, command: &[String], buffer: usize) -> Result<Self, String> {
@@ -274,6 +278,8 @@ impl Build {
             inherited_cursor: true,
             #[cfg(windows)]
             cursor_pending: String::new(),
+            #[cfg(windows)]
+            exit_drain_deadline: None,
         })
     }
     pub fn poll(&mut self) -> (bool, bool) {
@@ -313,10 +319,28 @@ impl Build {
         if self.exit.is_none() {
             if let Ok(Some(status)) = self.child.try_wait() {
                 self.exit = Some(format!("Build {status}"));
+                #[cfg(not(windows))]
                 self.writer.take();
                 #[cfg(windows)]
-                self.master.take();
+                {
+                    // ConPTY can report process exit before its output pipe has
+                    // delivered the child's final stdout/stderr. Keep both PTY
+                    // handles alive until the reader drains those final bytes.
+                    self.exit_drain_deadline = Some(Instant::now() + Duration::from_millis(250));
+                }
                 changed = true;
+            }
+        }
+        #[cfg(windows)]
+        if self.exit.is_some() && self.master.is_some() {
+            let drained = self.readers == 0;
+            let expired = self
+                .exit_drain_deadline
+                .is_some_and(|deadline| Instant::now() >= deadline);
+            if drained || expired {
+                self.writer.take();
+                self.master.take();
+                self.exit_drain_deadline = None;
             }
         }
         let finished = self.exit.is_some() && self.readers == 0;

@@ -359,7 +359,7 @@ impl Config {
         exec(&lua, DEFAULTS, "shipped pre_configured.lua")?;
         exec(
             &lua,
-            "fvim._shipped_workflow=fvim.workflow; fvim._native_highlights={}; for group,values in pairs(fvim.highlights) do if group:match('Diagnostic') or group=='Comment' or group=='String' or group=='Number' or group=='Keyword' or group=='Type' or group=='Function' or group=='Variable' or group=='Property' or group=='Constant' then fvim._native_highlights[group]=values end end",
+            "fvim._shipped_workflow=fvim.workflow; fvim._native_highlights={}; for group,values in pairs(fvim.highlights) do if group:match('Diagnostic') or group=='Comment' or group=='String' or group=='Number' or group=='Keyword' or group=='Type' or group=='Function' or group=='Variable' or group=='Property' or group=='Constant' or group=='SnippetPlaceholder' or group=='SnippetPlaceholderActive' then fvim._native_highlights[group]=values end end",
             "shipped workflow",
         )?;
         exec(&lua, defaults, "pre_configured.lua")?;
@@ -847,6 +847,20 @@ mod tests {
                 "Accepted: {script}"
             );
         }
+    }
+
+    #[test]
+    fn older_installed_palettes_inherit_snippet_placeholder_colors() {
+        let old = "fvim.themes.retrobox={dark={Normal={fg='#ebdbb2',bg='#1c1c1c'}},light={}}; vim.cmd.colorscheme('retrobox')";
+        let c = Config::from_scripts(old, "").unwrap();
+        assert_eq!(
+            c.settings.highlight("SnippetPlaceholderActive").bg,
+            Some((54, 89, 122))
+        );
+        assert_eq!(
+            c.settings.highlight("SnippetPlaceholder").bg,
+            Some((36, 52, 71))
+        );
     }
 
     #[test]

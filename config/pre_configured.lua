@@ -36,6 +36,8 @@ fvim.themes = {
             EndOfBuffer = { fg = '#504945', ctermfg = 239 },
             StatusLine = { fg = '#ebdbb2', bg = '#504945', ctermfg = 187, ctermbg = 239, bold = true },
             Visual = { bg = '#2a405a', ctermbg = 24 },
+            SnippetPlaceholder = { bg = '#243447', ctermbg = 24 },
+            SnippetPlaceholderActive = { bg = '#36597a', ctermbg = 25, bold = true },
             ModeMsg = { fg = '#fabd2f', ctermfg = 214, bold = true },
         },
         light = {
@@ -46,6 +48,8 @@ fvim.themes = {
             EndOfBuffer = { fg = '#e5d4b1', ctermfg = 187 },
             StatusLine = { fg = '#3c3836', bg = '#bdae93', ctermfg = 237, ctermbg = 144, bold = true },
             Visual = { bg = '#b0d0d0', ctermbg = 152 },
+            SnippetPlaceholder = { bg = '#dbe9ee', ctermbg = 254 },
+            SnippetPlaceholderActive = { bg = '#b0d0d0', ctermbg = 152, bold = true },
             ModeMsg = { fg = '#3c3836', ctermfg = 237, bold = true },
         },
     },

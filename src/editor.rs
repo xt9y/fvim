@@ -293,6 +293,17 @@ impl Editor {
         self.snippet.is_some()
     }
 
+    pub(crate) fn snippet_highlight(&self, row: usize, col: usize) -> Option<bool> {
+        let snippet = self.snippet.as_ref()?;
+        let offset = self.buffer.offset_at(row, col);
+        snippet
+            .stops
+            .iter()
+            .enumerate()
+            .find(|(_, stop)| stop.index != 0 && stop.start <= offset && offset < stop.end)
+            .map(|(index, _)| index == snippet.current)
+    }
+
     fn active_snippet_stop(&self) -> Option<SnippetStop> {
         let snippet = self.snippet.as_ref()?;
         snippet.stops.get(snippet.current).cloned()
@@ -436,19 +447,6 @@ impl Editor {
     }
 
     pub fn selected(&self, row: usize, col: usize) -> bool {
-        if self.mode == Mode::Insert
-            && self
-                .snippet
-                .as_ref()
-                .is_some_and(|snippet| snippet.pristine)
-        {
-            if let Some(stop) = self.active_snippet_stop() {
-                let offset = self.buffer.offset_at(row, col);
-                if stop.start <= offset && offset < stop.end {
-                    return true;
-                }
-            }
-        }
         match self.mode {
             Mode::Visual(Visual::Line) => (self.anchor.0.min(self.buffer.row)
                 ..=self.anchor.0.max(self.buffer.row))

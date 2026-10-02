@@ -62,6 +62,14 @@ impl Drop for Terminal {
     }
 }
 
+fn batchable_terminal_key(key: crossterm::event::KeyEvent) -> bool {
+    key.kind != KeyEventKind::Release
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        && matches!(key.code, KeyCode::Char(_))
+}
+
 fn edit(path: Option<PathBuf>) -> io::Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(io::Error::other("Interactive editing requires a terminal."));
@@ -75,6 +83,7 @@ fn edit(path: Option<PathBuf>) -> io::Result<()> {
     let mut out =
         BufWriter::with_capacity(workspace.settings.output_buffer_size, io::stdout().lock());
     let mut redraw = true;
+    let mut pending_input = None;
     loop {
         redraw |= workspace.poll();
         if redraw {
@@ -82,7 +91,7 @@ fn edit(path: Option<PathBuf>) -> io::Result<()> {
             renderer.draw_workspace(&mut workspace, size, &mut out)?;
         }
         redraw = true;
-        if !event::poll(std::time::Duration::from_millis(25))? {
+        if pending_input.is_none() && !event::poll(std::time::Duration::from_millis(2))? {
             let pending = workspace.has_pending_input();
             if workspace.timeout() {
                 return Ok(());
@@ -90,7 +99,33 @@ fn edit(path: Option<PathBuf>) -> io::Result<()> {
             redraw = pending || workspace.picker.as_mut().is_some_and(|p| p.poll());
             continue;
         }
-        let input = event::read()?;
+        let input = if let Some(input) = pending_input.take() {
+            input
+        } else {
+            event::read()?
+        };
+        if workspace.terminal_input() {
+            if let Event::Key(key) = &input {
+                if batchable_terminal_key(*key) {
+                    let mut bytes = terminal_key(*key);
+                    while event::poll(std::time::Duration::from_millis(1))? {
+                        let next = event::read()?;
+                        match next {
+                            Event::Key(next_key) if batchable_terminal_key(next_key) => {
+                                bytes.extend(terminal_key(next_key));
+                            }
+                            Event::Key(next_key) if next_key.kind == KeyEventKind::Release => {}
+                            other => {
+                                pending_input = Some(other);
+                                break;
+                            }
+                        }
+                    }
+                    workspace.terminal_write(&bytes);
+                    continue;
+                }
+            }
+        }
         match input {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 if !workspace.terminal_input()
@@ -143,7 +178,16 @@ pub(crate) fn terminal_key(key: crossterm::event::KeyEvent) -> Vec<u8> {
             }
         }
         KeyCode::Char(ch) => ch.to_string(),
-        KeyCode::Enter => "\r".into(),
+        KeyCode::Enter => {
+            #[cfg(windows)]
+            {
+                "\r\n".into()
+            }
+            #[cfg(not(windows))]
+            {
+                "\r".into()
+            }
+        }
         KeyCode::Backspace => "\x7f".into(),
         KeyCode::Tab => "\t".into(),
         KeyCode::BackTab => "\x1b[Z".into(),
@@ -210,6 +254,46 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod terminal_tests {
     use super::*;
+    #[test]
+    fn terminal_batching_only_coalesces_plain_text() {
+        use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
+        let key = |code, modifiers| KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        assert!(batchable_terminal_key(key(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE
+        )));
+        assert!(batchable_terminal_key(key(
+            KeyCode::Char('X'),
+            KeyModifiers::SHIFT
+        )));
+        assert!(!batchable_terminal_key(key(
+            KeyCode::Enter,
+            KeyModifiers::NONE
+        )));
+        assert!(!batchable_terminal_key(key(
+            KeyCode::Char('q'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!batchable_terminal_key(key(
+            KeyCode::Esc,
+            KeyModifiers::NONE
+        )));
+    }
+
+    #[test]
+    fn terminal_enter_uses_platform_line_ending() {
+        let key = crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        #[cfg(windows)]
+        assert_eq!(terminal_key(key), b"\r\n");
+        #[cfg(not(windows))]
+        assert_eq!(terminal_key(key), b"\r");
+    }
+
     #[test]
     fn legacy_control_backslash_and_control_letters_are_forwarded_as_bytes() {
         for (ch, byte) in [
