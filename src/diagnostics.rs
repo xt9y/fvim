@@ -197,6 +197,8 @@ pub struct Build {
     inherited_cursor: bool,
     #[cfg(windows)]
     cursor_pending: String,
+    #[cfg(windows)]
+    master_drain_polls: u8,
 }
 impl Build {
     pub fn start(root: &Path, command: &[String], buffer: usize) -> Result<Self, String> {
@@ -274,6 +276,8 @@ impl Build {
             inherited_cursor: true,
             #[cfg(windows)]
             cursor_pending: String::new(),
+            #[cfg(windows)]
+            master_drain_polls: 0,
         })
     }
     pub fn poll(&mut self) -> (bool, bool) {
@@ -315,8 +319,20 @@ impl Build {
                 self.exit = Some(format!("Build {status}"));
                 self.writer.take();
                 #[cfg(windows)]
-                self.master.take();
+                {
+                    // Give the ConPTY reader a couple of editor polls to drain
+                    // trailing child output before closing the master handle.
+                    self.master_drain_polls = 2;
+                }
                 changed = true;
+            }
+        }
+        #[cfg(windows)]
+        if self.exit.is_some() && self.master.is_some() {
+            if self.readers == 0 || self.master_drain_polls == 0 {
+                self.master.take();
+            } else {
+                self.master_drain_polls -= 1;
             }
         }
         let finished = self.exit.is_some() && self.readers == 0;
