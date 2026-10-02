@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
     thread,
+    time::{Duration, Instant},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -197,6 +198,8 @@ pub struct Build {
     inherited_cursor: bool,
     #[cfg(windows)]
     cursor_pending: String,
+    #[cfg(windows)]
+    exit_drain_deadline: Option<Instant>,
 }
 impl Build {
     pub fn start(root: &Path, command: &[String], buffer: usize) -> Result<Self, String> {
@@ -274,6 +277,8 @@ impl Build {
             inherited_cursor: true,
             #[cfg(windows)]
             cursor_pending: String::new(),
+            #[cfg(windows)]
+            exit_drain_deadline: None,
         })
     }
     pub fn poll(&mut self) -> (bool, bool) {
@@ -315,8 +320,24 @@ impl Build {
                 self.exit = Some(format!("Build {status}"));
                 self.writer.take();
                 #[cfg(windows)]
-                self.master.take();
+                {
+                    // ConPTY can report process exit before its output pipe has
+                    // delivered the child's final stdout/stderr. Keep the master
+                    // alive briefly so the reader thread can drain those bytes.
+                    self.exit_drain_deadline = Some(Instant::now() + Duration::from_millis(30));
+                }
                 changed = true;
+            }
+        }
+        #[cfg(windows)]
+        if self.exit.is_some() && self.master.is_some() {
+            let drained = self.readers == 0;
+            let expired = self
+                .exit_drain_deadline
+                .is_some_and(|deadline| Instant::now() >= deadline);
+            if drained || expired {
+                self.master.take();
+                self.exit_drain_deadline = None;
             }
         }
         let finished = self.exit.is_some() && self.readers == 0;
