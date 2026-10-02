@@ -2,11 +2,11 @@ mod tools;
 use crate::{
     buffer::Buffer,
     config::Settings,
-    editor::{Editor, Mode},
+    editor::{Editor, Mode, PromptCompletionItem, PromptCompletionMenu},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-use std::collections::HashMap;
-use std::{path::PathBuf, time::Instant};
+use std::collections::{HashMap, HashSet};
+use std::{path::{Path, PathBuf}, time::Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Axis {
@@ -554,6 +554,193 @@ impl Workspace {
             false
         }
     }
+    fn prompt_path_value(&self, path: &Path) -> String {
+        path.strip_prefix(&self.root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
+    fn prompt_path_items(&self, text: &str) -> Vec<PromptCompletionItem> {
+        let Some((command, argument)) = text.split_once(char::is_whitespace) else {
+            return vec![];
+        };
+        if !matches!(command, "e" | "edit" | "sp" | "split" | "vs" | "vsplit") {
+            return vec![];
+        }
+        let argument = argument.trim_start();
+        if argument.is_empty() {
+            return vec![];
+        }
+        let needle = argument.to_lowercase();
+        let mut seen = HashSet::new();
+        let mut items = Vec::new();
+
+        let current = self.editor().buffer.path.as_ref().map(|p| self.prompt_path_value(p));
+        if let Some(value) = current.as_ref().filter(|value| value.to_lowercase().starts_with(&needle)) {
+            seen.insert(value.clone());
+            items.push(PromptCompletionItem {
+                label: format!("[current] {value}"),
+                value: format!("{command} {value}"),
+                directory: false,
+            });
+        }
+        for editor in &self.buffers {
+            let Some(path) = editor.buffer.path.as_ref() else {
+                continue;
+            };
+            let value = self.prompt_path_value(path);
+            if value.to_lowercase().starts_with(&needle) && seen.insert(value.clone()) {
+                items.push(PromptCompletionItem {
+                    label: format!("[open] {value}"),
+                    value: format!("{command} {value}"),
+                    directory: false,
+                });
+            }
+        }
+
+        let separator = argument.rfind(['/', '\\']);
+        let (directory_text, fragment) = match separator {
+            Some(index) => (&argument[..=index], &argument[index + 1..]),
+            None => ("", argument),
+        };
+        let directory_path = if let Some(rest) = directory_text.strip_prefix("~/") {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| self.root.clone())
+                .join(rest)
+        } else {
+            let path = PathBuf::from(if directory_text.is_empty() { "." } else { directory_text });
+            if path.is_absolute() {
+                path
+            } else {
+                self.root.join(path)
+            }
+        };
+        let fragment = fragment.to_lowercase();
+        let mut filesystem = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&directory_path) {
+            for entry in entries.flatten().take(self.settings.picker_max_files.min(2000)) {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if !name.to_lowercase().starts_with(&fragment) {
+                    continue;
+                }
+                let directory = entry.file_type().is_ok_and(|kind| kind.is_dir());
+                let mut value = format!("{directory_text}{name}");
+                if directory {
+                    value.push('/');
+                }
+                if !seen.insert(value.clone()) {
+                    continue;
+                }
+                filesystem.push(PromptCompletionItem {
+                    label: format!("{} {value}", if directory { "[dir]" } else { "[file]" }),
+                    value: format!("{command} {value}"),
+                    directory,
+                });
+            }
+        }
+        filesystem.sort_by(|a, b| {
+            b.directory
+                .cmp(&a.directory)
+                .then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
+        });
+        items.extend(filesystem);
+        items.truncate(200);
+        items
+    }
+
+    fn prompt_search_items(&self, prefix: &str) -> Vec<PromptCompletionItem> {
+        if prefix.is_empty() || !prefix.chars().all(|ch| ch.is_alphanumeric() || ch == '_') {
+            return vec![];
+        }
+        let folded = prefix.to_lowercase();
+        let mut seen = HashSet::new();
+        let mut words = Vec::new();
+        for line in &self.editor().buffer.lines {
+            for word in line.split(|ch: char| !ch.is_alphanumeric() && ch != '_') {
+                if word.len() <= prefix.len()
+                    || !word.to_lowercase().starts_with(&folded)
+                    || !seen.insert(word.to_owned())
+                {
+                    continue;
+                }
+                words.push(word.to_owned());
+                if words.len() >= 200 {
+                    break;
+                }
+            }
+            if words.len() >= 200 {
+                break;
+            }
+        }
+        words.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+        words
+            .into_iter()
+            .map(|word| PromptCompletionItem {
+                label: format!("[syntax] {word}"),
+                value: word,
+                directory: false,
+            })
+            .collect()
+    }
+
+    fn refresh_prompt_completion(&mut self) {
+        let Some((kind, text)) = self
+            .editor()
+            .prompt
+            .as_ref()
+            .map(|prompt| (prompt.kind, prompt.text.clone()))
+        else {
+            self.editor_mut().prompt_completion = None;
+            return;
+        };
+        let items = if kind == ':' {
+            self.prompt_path_items(&text)
+        } else if matches!(kind, '/' | '?') {
+            self.prompt_search_items(&text)
+        } else {
+            vec![]
+        };
+        self.editor_mut().prompt_completion = (!items.is_empty()).then_some(PromptCompletionMenu {
+            items,
+            selected: None,
+        });
+    }
+
+    fn prompt_completion_key(&mut self, key: KeyEvent) -> Option<bool> {
+        if !key.modifiers.is_empty() {
+            return None;
+        }
+        match key.code {
+            KeyCode::Up | KeyCode::Down => {
+                let menu = self.editor_mut().prompt_completion.as_mut()?;
+                let reverse = key.code == KeyCode::Up;
+                menu.selected = Some(match menu.selected {
+                    None => if reverse { menu.items.len() - 1 } else { 0 },
+                    Some(index) if reverse => (index + menu.items.len() - 1) % menu.items.len(),
+                    Some(index) => (index + 1) % menu.items.len(),
+                });
+                Some(false)
+            }
+            KeyCode::Enter => {
+                let item = {
+                    let menu = self.editor().prompt_completion.as_ref()?;
+                    menu.selected.and_then(|index| menu.items.get(index)).cloned()?
+                };
+                self.editor_mut().prompt.as_mut().unwrap().text = item.value;
+                self.editor_mut().prompt_completion = None;
+                if item.directory {
+                    self.refresh_prompt_completion();
+                    Some(false)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     pub fn key(&mut self, key: KeyEvent) -> bool {
         self.last_input = Instant::now();
         self.editor_mut().popup = None;
@@ -626,6 +813,18 @@ impl Workspace {
                 build.cancel();
                 return false;
             }
+        }
+        if self.editor().prompt.is_some() {
+            if let Some(quit) = self.prompt_completion_key(key) {
+                return quit;
+            }
+            let quit = self.editor_mut().key(key);
+            if self.editor().prompt.is_some() {
+                self.refresh_prompt_completion();
+            } else {
+                self.editor_mut().prompt_completion = None;
+            }
+            return quit || self.dispatch();
         }
         if self.editor().mode == Mode::Insert {
             if key.modifiers.contains(KeyModifiers::CONTROL)
@@ -730,6 +929,9 @@ impl Workspace {
         let quit = self.editor_mut().key(key);
         if inserting && self.editor().mode == Mode::Normal {
             self.refresh_diagnostics();
+        }
+        if self.editor().prompt.is_some() {
+            self.refresh_prompt_completion();
         }
         quit || self.dispatch()
     }
