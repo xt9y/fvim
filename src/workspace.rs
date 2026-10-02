@@ -559,10 +559,19 @@ impl Workspace {
         }
     }
     fn prompt_path_value(&self, path: &Path) -> String {
-        path.strip_prefix(&self.root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/")
+        let value = if let Ok(relative) = path.strip_prefix(&self.root) {
+            relative.to_path_buf()
+        } else if let (Ok(root), Ok(path)) = (
+            std::fs::canonicalize(&self.root),
+            std::fs::canonicalize(path),
+        ) {
+            path.strip_prefix(&root)
+                .map(Path::to_path_buf)
+                .unwrap_or(path)
+        } else {
+            path.to_path_buf()
+        };
+        value.to_string_lossy().replace('\\', "/")
     }
 
     fn prompt_path_items(&self, text: &str) -> Vec<PromptCompletionItem> {
