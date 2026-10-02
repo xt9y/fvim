@@ -67,7 +67,7 @@ fn batchable_terminal_key(key: crossterm::event::KeyEvent) -> bool {
         && !key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-        && matches!(key.code, KeyCode::Char(_) | KeyCode::Enter)
+        && matches!(key.code, KeyCode::Char(_))
 }
 
 fn edit(path: Option<PathBuf>) -> io::Result<()> {
@@ -246,7 +246,7 @@ fn main() -> ExitCode {
 mod terminal_tests {
     use super::*;
     #[test]
-    fn terminal_batching_only_coalesces_plain_text_and_enter() {
+    fn terminal_batching_only_coalesces_plain_text() {
         use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
         let key = |code, modifiers| KeyEvent {
             code,
@@ -262,7 +262,7 @@ mod terminal_tests {
             KeyCode::Char('X'),
             KeyModifiers::SHIFT
         )));
-        assert!(batchable_terminal_key(key(
+        assert!(!batchable_terminal_key(key(
             KeyCode::Enter,
             KeyModifiers::NONE
         )));
