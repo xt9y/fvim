@@ -182,6 +182,7 @@ impl Workspace {
             editor.semantic.clear();
             editor.popup = None;
             editor.completion = None;
+            editor.prompt_completion = None;
         }
     }
     fn store_cursor(&mut self) {
