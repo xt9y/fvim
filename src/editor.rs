@@ -105,6 +105,10 @@ pub struct Editor {
     pub prompt: Option<Prompt>,
     pub page_rows: usize,
     search: Option<Search>,
+    command_history: Vec<String>,
+    search_history: Vec<String>,
+    prompt_history_index: Option<usize>,
+    prompt_draft: String,
     confirmation: Option<Confirmation>,
     visual_range: Option<(usize, usize)>,
     anchor: (usize, usize),
@@ -146,6 +150,10 @@ impl Editor {
             prompt: None,
             page_rows: 20,
             search: None,
+            command_history: vec![],
+            search_history: vec![],
+            prompt_history_index: None,
+            prompt_draft: String::new(),
             confirmation: None,
             visual_range: None,
             anchor: (0, 0),
@@ -998,11 +1006,15 @@ impl Editor {
                     self.anchor.0.max(self.buffer.row),
                 ));
                 self.mode = Mode::Normal;
+                self.prompt_history_index = None;
+                self.prompt_draft.clear();
                 self.prompt = Some(Prompt {
                     kind: ch,
                     text: "'<,'>".into(),
                 });
             } else {
+                self.prompt_history_index = None;
+                self.prompt_draft.clear();
                 self.prompt = Some(Prompt {
                     kind: ch,
                     text: String::new(),
@@ -1652,6 +1664,32 @@ mod tests {
         assert!(e.execute_ex("wq").unwrap());
         assert_eq!(std::fs::read_to_string(&second).unwrap(), "OTHER\r\n");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn command_and_search_prompts_cycle_history_with_plain_arrows() {
+        let mut e = editor("one two one");
+
+        keys(&mut e, ":undo\n:redo\n:");
+        e.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(e.prompt.as_ref().unwrap().text, "redo");
+        e.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(e.prompt.as_ref().unwrap().text, "undo");
+        e.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(e.prompt.as_ref().unwrap().text, "redo");
+        e.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(e.prompt.as_ref().unwrap().text, "");
+        e.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        keys(&mut e, "/one\n?two\n/");
+        e.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(e.prompt.as_ref().unwrap().text, "two");
+        e.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(e.prompt.as_ref().unwrap().text, "one");
+        e.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(e.prompt.as_ref().unwrap().text, "two");
+        e.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(e.prompt.as_ref().unwrap().text, "");
     }
 
     #[test]

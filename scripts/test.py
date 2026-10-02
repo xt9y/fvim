@@ -328,7 +328,7 @@ def exercise_editor(send, expect, clear, path, observed):
     send(b"gg0iX")
     expect(b"fixture_completion")
     clear()
-    send(b"\t\r\x13")
+    send(b"\x1b[B\r\x13")
     expect(b"Saved.")
     expect_file(language, b"fixture_completionint main(void) { return 0; }")
     clear()

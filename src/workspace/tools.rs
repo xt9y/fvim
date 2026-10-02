@@ -349,12 +349,11 @@ impl Workspace {
             return false;
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if key.code == KeyCode::Tab
-            || key.code == KeyCode::BackTab
-            || (ctrl && matches!(key.code, KeyCode::Char('n' | 'p')))
-        {
+        let plain_arrow =
+            key.modifiers.is_empty() && matches!(key.code, KeyCode::Up | KeyCode::Down);
+        if plain_arrow || (ctrl && matches!(key.code, KeyCode::Char('n' | 'p'))) {
             let menu = self.editor_mut().completion.as_mut().unwrap();
-            let reverse = key.code == KeyCode::BackTab || key.code == KeyCode::Char('p');
+            let reverse = key.code == KeyCode::Up || key.code == KeyCode::Char('p');
             menu.selected = Some(match menu.selected {
                 None => {
                     if reverse {
@@ -749,6 +748,42 @@ fn locations(value: &Value) -> Vec<crate::picker::Entry> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn completion_menu_uses_plain_arrows_and_leaves_shift_arrows_to_the_editor() {
+        let mut w = Workspace::new(Buffer::from_text("a\nb"), PathBuf::from("."));
+        w.editor_mut().mode = Mode::Insert;
+        w.editor_mut().completion = Some(CompletionMenu {
+            items: vec![
+                Completion {
+                    label: "one".into(),
+                    text: "one".into(),
+                    start: (0, 0),
+                    end: (0, 1),
+                    additional: vec![],
+                },
+                Completion {
+                    label: "two".into(),
+                    text: "two".into(),
+                    start: (0, 0),
+                    end: (0, 1),
+                    additional: vec![],
+                },
+            ],
+            selected: None,
+        });
+
+        w.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(w.editor().completion.as_ref().unwrap().selected, Some(0));
+        w.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(w.editor().completion.as_ref().unwrap().selected, Some(1));
+        w.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(w.editor().completion.as_ref().unwrap().selected, Some(0));
+
+        w.key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        assert!(w.editor().completion.is_none());
+        assert_eq!(w.editor().buffer.row, 1);
+    }
+
     #[test]
     fn completion_applies_include_edits_and_tracks_cursor_and_undo() {
         let mut e = Editor::new(Buffer::from_text("// heading\nvec"));

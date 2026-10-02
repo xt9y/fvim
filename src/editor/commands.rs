@@ -335,11 +335,54 @@ impl Editor {
     }
 
     pub(super) fn prompt_key(&mut self, key: KeyEvent) -> bool {
+        let plain = key.modifiers.is_empty();
         match key.code {
             KeyCode::Esc => {
                 self.prompt = None;
+                self.prompt_history_index = None;
+                self.prompt_draft.clear();
                 self.reset_command();
                 self.finish();
+            }
+            KeyCode::Up if plain => {
+                let kind = self.prompt.as_ref().unwrap().kind;
+                let history = if kind == ':' {
+                    &self.command_history
+                } else {
+                    &self.search_history
+                };
+                if history.is_empty() {
+                    return false;
+                }
+                let next = if let Some(index) = self.prompt_history_index {
+                    index.saturating_sub(1)
+                } else {
+                    self.prompt_draft = self.prompt.as_ref().unwrap().text.clone();
+                    history.len() - 1
+                };
+                let text = history[next].clone();
+                self.prompt_history_index = Some(next);
+                self.prompt.as_mut().unwrap().text = text;
+            }
+            KeyCode::Down if plain => {
+                let Some(index) = self.prompt_history_index else {
+                    return false;
+                };
+                let kind = self.prompt.as_ref().unwrap().kind;
+                let history = if kind == ':' {
+                    &self.command_history
+                } else {
+                    &self.search_history
+                };
+                if index + 1 < history.len() {
+                    let next = index + 1;
+                    let text = history[next].clone();
+                    self.prompt_history_index = Some(next);
+                    self.prompt.as_mut().unwrap().text = text;
+                } else {
+                    self.prompt_history_index = None;
+                    self.prompt.as_mut().unwrap().text = self.prompt_draft.clone();
+                }
             }
             KeyCode::Backspace => {
                 self.prompt.as_mut().unwrap().text.pop();
@@ -349,6 +392,16 @@ impl Editor {
             }
             KeyCode::Enter => {
                 let p = self.prompt.take().unwrap();
+                let history = if p.kind == ':' {
+                    &mut self.command_history
+                } else {
+                    &mut self.search_history
+                };
+                if !p.text.is_empty() && history.last() != Some(&p.text) {
+                    history.push(p.text.clone());
+                }
+                self.prompt_history_index = None;
+                self.prompt_draft.clear();
                 let quit = if p.kind == ':' {
                     self.ex(&p.text)
                 } else {
