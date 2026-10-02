@@ -4,7 +4,7 @@ use crate::{
     config::Settings,
     editor::{Editor, Mode},
 };
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use std::collections::HashMap;
 use std::{path::PathBuf, time::Instant};
 
@@ -87,6 +87,15 @@ pub struct Window {
     pub goal: Option<usize>,
     pub renderer: crate::renderer::Renderer,
 }
+fn mapping_key(mut key: KeyEvent) -> KeyEvent {
+    key.kind = KeyEventKind::Press;
+    key.state = KeyEventState::NONE;
+    if matches!(key.code, KeyCode::Char(_)) {
+        key.modifiers.remove(KeyModifiers::SHIFT);
+    }
+    key
+}
+
 pub struct Workspace {
     pub buffers: Vec<Editor>,
     pub windows: Vec<Option<Window>>,
@@ -586,6 +595,32 @@ impl Workspace {
             self.editor_mut().message = "Terminal: Ctrl-\\ Ctrl-N returns to Normal".into();
             return false;
         }
+        let system_shortcut = key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER);
+        if system_shortcut && self.editor().terminal.is_none() && self.editor().mode != Mode::Insert
+        {
+            match key.code {
+                KeyCode::Char('c') => {
+                    let text = self.editor().clipboard_text();
+                    if let Err(error) = crate::clipboard::set(&text) {
+                        self.editor_mut().message = format!("Clipboard copy failed: {error}");
+                    }
+                    return false;
+                }
+                KeyCode::Char('v') if self.editor().mode == Mode::Normal => {
+                    match crate::clipboard::get() {
+                        Ok(text) if !text.is_empty() => self.editor_mut().paste(&text),
+                        Ok(_) => {}
+                        Err(error) => {
+                            self.editor_mut().message = format!("Clipboard paste failed: {error}")
+                        }
+                    }
+                    return false;
+                }
+                _ => {}
+            }
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             if let Some(build) = &mut self.build {
                 build.cancel();
@@ -661,6 +696,7 @@ impl Workspace {
             return self.editor_mut().key(key);
         }
         if self.editor().mapping_ready() || !self.pending_keys.is_empty() {
+            let key = mapping_key(key);
             self.pending_keys.push(key);
             self.pending_at = Instant::now();
             let mode = if self.editor().mode == Mode::Normal {
@@ -949,6 +985,26 @@ mod tests {
         w.command("blockcomment").unwrap();
         w.command("blockcomment").unwrap();
         assert_eq!(w.editor().buffer.lines[0], "  alpha");
+    }
+
+    #[test]
+    fn visual_mapping_ignores_terminal_key_metadata() {
+        let mut w = Workspace::new(Buffer::from_text("alpha\nbeta\ngamma"), PathBuf::from("."));
+        w.editor_mut().buffer.path = Some(PathBuf::from("test.c"));
+        key(&mut w, 'V');
+        key(&mut w, 'j');
+
+        for ch in ['g', 'c', 'c'] {
+            w.key(KeyEvent {
+                code: KeyCode::Char(ch),
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Repeat,
+                state: KeyEventState::CAPS_LOCK,
+            });
+        }
+
+        assert_eq!(w.editor().buffer.body(), "// alpha\n// beta\ngamma");
+        assert_eq!(w.editor().mode, Mode::Normal);
     }
 
     #[test]

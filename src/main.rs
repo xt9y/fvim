@@ -1,4 +1,5 @@
 mod buffer;
+mod clipboard;
 mod command;
 mod config;
 mod diagnostics;

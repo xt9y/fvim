@@ -178,6 +178,36 @@ impl Editor {
             && !self.register_pending
     }
 
+    pub fn clipboard_text(&self) -> String {
+        match self.mode {
+            Mode::Visual(Visual::Line) => {
+                let start = self.anchor.0.min(self.buffer.row);
+                let end = self.anchor.0.max(self.buffer.row);
+                format!("{}\n", self.buffer.lines[start..=end].join("\n"))
+            }
+            Mode::Visual(Visual::Character) => {
+                let a = self.buffer.offset_at(self.anchor.0, self.anchor.1);
+                let b = self.buffer.offset();
+                self.buffer
+                    .chars_forward(a.min(b))
+                    .take(a.max(b) - a.min(b) + 1)
+                    .collect()
+            }
+            Mode::Visual(Visual::Block) => {
+                let start = self.anchor.0.min(self.buffer.row);
+                let end = self.anchor.0.max(self.buffer.row);
+                let col = self.anchor.1.min(self.buffer.col);
+                let width = self.anchor.1.max(self.buffer.col) - col + 1;
+                self.buffer.lines[start..=end]
+                    .iter()
+                    .map(|line| line.chars().skip(col).take(width).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            _ => format!("{}\n", self.buffer.lines[self.buffer.row]),
+        }
+    }
+
     pub fn cancel_selection(&mut self) {
         self.goal = None;
         self.mode = Mode::Normal;
@@ -1442,6 +1472,21 @@ mod tests {
     }
     fn ctrl(e: &mut Editor, ch: char) {
         e.key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn clipboard_text_tracks_normal_and_visual_ranges() {
+        let mut e = editor("alpha\nbeta\ngamma");
+        assert_eq!(e.clipboard_text(), "alpha\n");
+
+        keys(&mut e, "Vj");
+        assert_eq!(e.clipboard_text(), "alpha\nbeta\n");
+        keys(&mut e, "\u{1b}");
+
+        e.buffer.row = 0;
+        e.buffer.col = 1;
+        keys(&mut e, "vj");
+        assert_eq!(e.clipboard_text(), "lpha\nbe");
     }
 
     #[test]
