@@ -599,7 +599,7 @@ impl Workspace {
             }
         }
 
-        let separator = argument.rfind(['/', '\\']);
+        let separator = argument.rfind(|ch| ch == '/' || ch == '\\');
         let (directory_text, fragment) = match separator {
             Some(index) => (&argument[..=index], &argument[index + 1..]),
             None => ("", argument),
