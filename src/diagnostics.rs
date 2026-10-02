@@ -4,8 +4,9 @@ use std::{
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
     thread,
-    time::{Duration, Instant},
 };
+#[cfg(windows)]
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
