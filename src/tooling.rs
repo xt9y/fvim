@@ -14,6 +14,33 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+pub fn normalized_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let raw = path.to_string_lossy();
+        if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = raw.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+    path.to_owned()
+}
+
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    let a = normalized_path(a);
+    let b = normalized_path(b);
+    #[cfg(windows)]
+    {
+        return a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy());
+    }
+    #[cfg(not(windows))]
+    {
+        a == b
+    }
+}
+
 pub fn uri(path: &Path) -> String {
     let path = if path.is_absolute() {
         path.to_owned()
@@ -423,11 +450,19 @@ impl Tools {
         self.epoch = self.epoch.wrapping_add(1);
         let _ = self.sender.send(Input::Settings(s));
     }
+    pub fn try_event(&self) -> Option<Event> {
+        loop {
+            match self.receiver.try_recv() {
+                Ok((epoch, event)) if epoch == self.epoch => return Some(event),
+                Ok(_) => continue,
+                Err(_) => return None,
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub fn poll(&self) -> Vec<Event> {
-        self.receiver
-            .try_iter()
-            .filter_map(|(epoch, event)| (epoch == self.epoch).then_some(event))
-            .collect()
+        std::iter::from_fn(|| self.try_event()).collect()
     }
 }
 impl Drop for Tools {
@@ -1040,6 +1075,21 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn lexical_path_normalization_preserves_platform_identity_without_io() {
+        let plain = PathBuf::from(if cfg!(windows) { r"C:\repo\file.c" } else { "/repo/file.c" });
+        assert!(same_path(&plain, &plain));
+        #[cfg(windows)]
+        {
+            assert_eq!(normalized_path(Path::new(r"\\?\C:\repo\file.c")), plain);
+            assert!(same_path(Path::new(r"\\?\C:\Repo\FILE.c"), &plain));
+            assert_eq!(
+                normalized_path(Path::new(r"\\?\UNC\server\share\file.c")),
+                PathBuf::from(r"\\server\share\file.c")
+            );
+        }
+    }
+
     #[test]
     fn incremental_change_sends_only_the_changed_utf16_range() {
         assert_eq!(
