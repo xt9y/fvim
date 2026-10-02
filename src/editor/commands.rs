@@ -339,6 +339,7 @@ impl Editor {
         match key.code {
             KeyCode::Esc => {
                 self.prompt = None;
+                self.prompt_completion = None;
                 self.prompt_history_index = None;
                 self.prompt_draft.clear();
                 self.reset_command();
@@ -392,6 +393,7 @@ impl Editor {
             }
             KeyCode::Enter => {
                 let p = self.prompt.take().unwrap();
+                self.prompt_completion = None;
                 let history = if p.kind == ':' {
                     &mut self.command_history
                 } else {
