@@ -54,6 +54,18 @@ pub struct Prompt {
 }
 
 #[derive(Clone)]
+pub struct PromptCompletionItem {
+    pub label: String,
+    pub value: String,
+    pub directory: bool,
+}
+
+pub struct PromptCompletionMenu {
+    pub items: Vec<PromptCompletionItem>,
+    pub selected: Option<usize>,
+}
+
+#[derive(Clone)]
 pub struct CompletionEdit {
     pub start: (usize, usize),
     pub end: (usize, usize),
@@ -92,6 +104,7 @@ pub struct Editor {
     pub semantic: Vec<crate::syntax::Span>,
     pub popup: Option<Vec<String>>,
     pub completion: Option<CompletionMenu>,
+    pub prompt_completion: Option<PromptCompletionMenu>,
     pub title: Option<String>,
     pub diagnostics: Vec<crate::diagnostics::Diagnostic>,
     pub syntax: Vec<crate::syntax::Span>,
@@ -137,6 +150,7 @@ impl Editor {
             semantic: vec![],
             popup: None,
             completion: None,
+            prompt_completion: None,
             title: None,
             diagnostics: vec![],
             syntax: vec![],
@@ -1008,6 +1022,7 @@ impl Editor {
                 self.mode = Mode::Normal;
                 self.prompt_history_index = None;
                 self.prompt_draft.clear();
+                self.prompt_completion = None;
                 self.prompt = Some(Prompt {
                     kind: ch,
                     text: "'<,'>".into(),
@@ -1015,6 +1030,7 @@ impl Editor {
             } else {
                 self.prompt_history_index = None;
                 self.prompt_draft.clear();
+                self.prompt_completion = None;
                 self.prompt = Some(Prompt {
                     kind: ch,
                     text: String::new(),
