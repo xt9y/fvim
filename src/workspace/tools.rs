@@ -50,7 +50,7 @@ impl Workspace {
                         e.buffer
                             .path
                             .as_ref()
-                            .is_some_and(|stored| tooling::same_path(p, stored))
+                            .is_some_and(|stored| tooling::uri(p) == tooling::uri(stored))
                     })
                 })
                 .cloned()
@@ -148,9 +148,8 @@ impl Workspace {
             }
             e.semantic.clear();
             self.tool_version += 1;
-            let absolute = tooling::normalized_path(path);
-            self.versions
-                .insert(tooling::path_key(&absolute), self.tool_version);
+            let absolute = tooling::from_uri(&tooling::uri(path)).unwrap_or_else(|| path.clone());
+            self.versions.insert(absolute.clone(), self.tool_version);
             self.synced.insert(
                 id,
                 (e.buffer.revision, path.clone(), self.tool_version, dirty),
@@ -178,7 +177,7 @@ impl Workspace {
                     version,
                     spans,
                 } => {
-                    if self.versions.get(&tooling::path_key(&path)) != Some(&version) {
+                    if self.versions.get(&path) != Some(&version) {
                         continue;
                     }
                     for (id, e) in self.buffers.iter_mut().enumerate() {
@@ -203,7 +202,7 @@ impl Workspace {
                     spans,
                     diagnostics,
                 } => {
-                    if self.versions.get(&tooling::path_key(&path)) != Some(&version) {
+                    if self.versions.get(&path) != Some(&version) {
                         continue;
                     }
                     let mut applied = false;
@@ -229,7 +228,7 @@ impl Workspace {
                     items,
                 } => {
                     if version.is_some_and(|v| {
-                        self.versions.get(&tooling::path_key(&path)).is_some_and(|current| v < *current)
+                        self.versions.get(&path).is_some_and(|current| v < *current)
                     }) {
                         continue;
                     }
@@ -245,14 +244,14 @@ impl Workspace {
                     col,
                     value,
                 } => {
-                    if self.versions.get(&tooling::path_key(&path)) != Some(&version) {
+                    if self.versions.get(&path) != Some(&version) {
                         continue;
                     }
                     let e = self.editor();
                     if e.buffer
                         .path
                         .as_ref()
-                        .is_none_or(|p| !tooling::same_path(p, &path))
+                        .is_none_or(|p| tooling::uri(p) != tooling::uri(&path))
                     {
                         continue;
                     }
