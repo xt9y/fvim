@@ -866,11 +866,8 @@ mod tests {
         assert!(c.settings.keymaps.iter().any(|mapping| {
             mapping.mode == "n" && mapping.keys == gbc && mapping.action == "blockcomment"
         }));
-        assert!(!c
-            .settings
-            .keymaps
-            .iter()
-            .any(|mapping| mapping.mode == "v" && matches!(mapping.action.as_str(), "comment" | "blockcomment")));
+        assert!(!c.settings.keymaps.iter().any(|mapping| mapping.mode == "v"
+            && matches!(mapping.action.as_str(), "comment" | "blockcomment")));
         assert_eq!(c.settings.comments.get("c").unwrap().0, "//");
 
         let c = Config::from_scripts(old, "vim.keymap.set('v','gc','comment')").unwrap();

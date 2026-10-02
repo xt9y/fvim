@@ -1249,10 +1249,7 @@ mod tests {
 
     #[test]
     fn edit_prompt_tabs_from_empty_argument_and_descends_directories() {
-        let root = std::env::temp_dir().join(format!(
-            "fvim-prompt-empty-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("fvim-prompt-empty-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/main.c"), "int main;").unwrap();
@@ -1274,10 +1271,7 @@ mod tests {
         assert!(menu.items.iter().any(|item| item.value == "e src/main.c"));
 
         w.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(
-            w.editor().prompt.as_ref().unwrap().text,
-            "e src/main.c"
-        );
+        assert_eq!(w.editor().prompt.as_ref().unwrap().text, "e src/main.c");
         w.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(w
             .editor()
@@ -1291,10 +1285,7 @@ mod tests {
 
     #[test]
     fn path_prompt_completion_works_before_typing_an_argument_for_all_open_commands() {
-        let root = std::env::temp_dir().join(format!(
-            "fvim-prompt-aliases-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("fvim-prompt-aliases-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("candidate.c"), "int candidate;").unwrap();
@@ -1587,9 +1578,7 @@ mod tests {
     fn native_visual_comment_prefix_never_enters_mapping_timeout() {
         let mut w = Workspace::new(Buffer::from_text("alpha\nbeta\ngamma"), PathBuf::from("."));
         w.editor_mut().buffer.path = Some(PathBuf::from("test.c"));
-        w.settings
-            .keymaps
-            .retain(|mapping| mapping.mode != "v");
+        w.settings.keymaps.retain(|mapping| mapping.mode != "v");
         w.editor_mut()
             .settings
             .keymaps
@@ -1614,12 +1603,13 @@ mod tests {
     fn visual_comments_work_without_any_configured_comment_keymaps() {
         let mut w = Workspace::new(Buffer::from_text("alpha\nbeta\ngamma"), PathBuf::from("."));
         w.editor_mut().buffer.path = Some(PathBuf::from("test.c"));
-        w.settings.keymaps.retain(|mapping| {
-            !matches!(mapping.action.as_str(), "comment" | "blockcomment")
-        });
-        w.editor_mut().settings.keymaps.retain(|mapping| {
-            !matches!(mapping.action.as_str(), "comment" | "blockcomment")
-        });
+        w.settings
+            .keymaps
+            .retain(|mapping| !matches!(mapping.action.as_str(), "comment" | "blockcomment"));
+        w.editor_mut()
+            .settings
+            .keymaps
+            .retain(|mapping| !matches!(mapping.action.as_str(), "comment" | "blockcomment"));
         w.settings.mapping_timeout = 0;
 
         key(&mut w, 'V');
