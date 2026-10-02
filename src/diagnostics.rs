@@ -325,7 +325,7 @@ impl Build {
                     // ConPTY can report process exit before its output pipe has
                     // delivered the child's final stdout/stderr. Keep the master
                     // alive briefly so the reader thread can drain those bytes.
-                    self.exit_drain_deadline = Some(Instant::now() + Duration::from_millis(30));
+                    self.exit_drain_deadline = Some(Instant::now() + Duration::from_millis(250));
                 }
                 changed = true;
             }
