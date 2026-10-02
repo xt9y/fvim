@@ -33,7 +33,9 @@ pub fn same_path(a: &Path, b: &Path) -> bool {
     let b = normalized_path(b);
     #[cfg(windows)]
     {
-        return a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy());
+        return a
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&b.to_string_lossy());
     }
     #[cfg(not(windows))]
     {
@@ -1077,7 +1079,11 @@ mod tests {
     use super::*;
     #[test]
     fn lexical_path_normalization_preserves_platform_identity_without_io() {
-        let plain = PathBuf::from(if cfg!(windows) { r"C:\repo\file.c" } else { "/repo/file.c" });
+        let plain = PathBuf::from(if cfg!(windows) {
+            r"C:\repo\file.c"
+        } else {
+            "/repo/file.c"
+        });
         assert!(same_path(&plain, &plain));
         #[cfg(windows)]
         {
