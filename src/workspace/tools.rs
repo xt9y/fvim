@@ -148,11 +148,7 @@ impl Workspace {
             }
             e.semantic.clear();
             self.tool_version += 1;
-            let absolute = if path.is_absolute() {
-                path.clone()
-            } else {
-                self.root.join(path)
-            };
+            let absolute = tooling::from_uri(&tooling::uri(path)).unwrap_or_else(|| path.clone());
             self.versions.insert(absolute.clone(), self.tool_version);
             self.synced.insert(
                 id,
