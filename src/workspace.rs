@@ -949,7 +949,9 @@ impl Workspace {
         }
         let inserting = self.editor().mode == Mode::Insert;
         let typed_completion_character = inserting
-            && key.modifiers.is_empty()
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
             && matches!(key.code, KeyCode::Char(ch) if !ch.is_whitespace());
         let quit = self.editor_mut().key(key);
         if inserting {
@@ -1085,6 +1087,12 @@ mod tests {
         assert!(w.completion_allowed.is_none());
 
         key(&mut w, 'x');
+        assert!(w.completion_allowed.is_some());
+
+        w.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert!(w.completion_allowed.is_none());
+
+        w.key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT));
         assert!(w.completion_allowed.is_some());
 
         w.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
