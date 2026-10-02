@@ -835,12 +835,18 @@ impl Workspace {
                 && matches!(key.code, KeyCode::Null | KeyCode::Char(' '))
             {
                 let id = self.windows[self.active].as_ref().unwrap().buffer;
-                let e = self.editor();
-                if let Some(path) = e.buffer.path.clone() {
-                    self.completion_allowed =
-                        Some((id, e.buffer.revision, e.buffer.row, e.buffer.col));
-                    self.tools
-                        .request(path, e.buffer.row, e.buffer.col, "textDocument/completion");
+                let (path, revision, row, col) = {
+                    let e = self.editor();
+                    (
+                        e.buffer.path.clone(),
+                        e.buffer.revision,
+                        e.buffer.row,
+                        e.buffer.col,
+                    )
+                };
+                if let Some(path) = path {
+                    self.completion_allowed = Some((id, revision, row, col));
+                    self.tools.request(path, row, col, "textDocument/completion");
                 }
                 return false;
             }
@@ -940,9 +946,11 @@ impl Workspace {
         if inserting {
             let id = self.windows[self.active].as_ref().unwrap().buffer;
             if typed_completion_character && self.editor().mode == Mode::Insert {
-                let e = self.editor();
-                self.completion_allowed =
-                    Some((id, e.buffer.revision, e.buffer.row, e.buffer.col));
+                let (revision, row, col) = {
+                    let e = self.editor();
+                    (e.buffer.revision, e.buffer.row, e.buffer.col)
+                };
+                self.completion_allowed = Some((id, revision, row, col));
             } else {
                 self.completion_allowed = None;
             }
@@ -1059,6 +1067,25 @@ mod tests {
 
     fn key(w: &mut Workspace, ch: char) {
         w.key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn automatic_completion_is_armed_only_by_typed_nonwhitespace_characters() {
+        let mut w = Workspace::new(Buffer::from_text(""), PathBuf::from("."));
+        key(&mut w, 'i');
+        assert!(w.completion_allowed.is_none());
+
+        key(&mut w, 'x');
+        assert!(w.completion_allowed.is_some());
+
+        w.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert!(w.completion_allowed.is_none());
+
+        key(&mut w, '.');
+        assert!(w.completion_allowed.is_some());
+
+        key(&mut w, ' ');
+        assert!(w.completion_allowed.is_none());
     }
 
     #[test]
