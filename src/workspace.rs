@@ -1024,6 +1024,9 @@ impl Workspace {
         } else {
             self.flush_keys();
             self.editor_mut().paste(text);
+            if self.editor().prompt.is_some() {
+                self.refresh_prompt_completion();
+            }
         }
     }
 }
@@ -1036,6 +1039,62 @@ mod tests {
 
     fn key(w: &mut Workspace, ch: char) {
         w.key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn edit_prompt_completes_current_open_files_and_directories() {
+        let root = std::env::temp_dir().join(format!("fvim-prompt-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.c"), "int main;").unwrap();
+        std::fs::write(root.join("second.c"), "int second;").unwrap();
+
+        let mut first = Buffer::open(Some(root.join("second.c"))).unwrap();
+        first.row = 0;
+        let mut w = Workspace::new(first, PathBuf::from("."));
+        w.root = root.clone();
+
+        for ch in ":e s".chars() {
+            key(&mut w, ch);
+        }
+        let menu = w.editor().prompt_completion.as_ref().unwrap();
+        assert!(menu.items.iter().any(|item| item.label.contains("[current] second.c")));
+        assert!(menu.items.iter().any(|item| item.label.contains("[dir] src/")));
+
+        key(&mut w, 'r');
+        key(&mut w, 'c');
+        key(&mut w, '/');
+        key(&mut w, 'm');
+        let menu = w.editor().prompt_completion.as_ref().unwrap();
+        assert!(menu.items.iter().any(|item| item.value == "e src/main.c"));
+
+        w.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        w.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(w
+            .editor()
+            .buffer
+            .path
+            .as_ref()
+            .is_some_and(|path| path.ends_with("src/main.c")));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn search_prompt_completes_identifiers_from_the_focused_file() {
+        let mut w = Workspace::new(
+            Buffer::from_text("alphaThing beta\nalphaOther gamma"),
+            PathBuf::from("."),
+        );
+        for ch in "/alp".chars() {
+            key(&mut w, ch);
+        }
+        let menu = w.editor().prompt_completion.as_ref().unwrap();
+        assert!(menu.items.iter().any(|item| item.value == "alphaThing"));
+        assert!(menu.items.iter().any(|item| item.value == "alphaOther"));
+
+        w.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        w.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(w.editor().prompt.is_none());
     }
 
     #[test]
