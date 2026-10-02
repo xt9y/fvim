@@ -4,7 +4,9 @@ use crate::{
     config::Settings,
     editor::{Editor, Mode, PromptCompletionItem, PromptCompletionMenu},
 };
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEventKind,
+};
 use std::collections::{HashMap, HashSet};
 use std::{
     path::{Path, PathBuf},
@@ -124,6 +126,8 @@ pub struct Workspace {
     window_prefix: bool,
     discard_armed: bool,
     completion_allowed: Option<(usize, u64, usize, usize)>,
+    mouse_anchor: Option<(usize, usize, usize)>,
+    mouse_dragged: bool,
 }
 
 impl Workspace {
@@ -163,6 +167,8 @@ impl Workspace {
             window_prefix: false,
             discard_armed: false,
             completion_allowed: None,
+            mouse_anchor: None,
+            mouse_dragged: false,
         }
     }
     pub fn editor(&self) -> &Editor {
@@ -1145,6 +1151,71 @@ impl Workspace {
             self.buffers[id].terminal = Some(build.screen().clone());
         }
     }
+    pub fn mouse(
+        &mut self,
+        target: Option<(usize, usize, usize)>,
+        kind: MouseEventKind,
+    ) {
+        self.last_input = Instant::now();
+        self.completion_allowed = None;
+        self.pending_keys.clear();
+        self.editor_mut().completion = None;
+        self.editor_mut().popup = None;
+
+        match kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some((window, row, col)) = target else {
+                    self.mouse_anchor = None;
+                    self.mouse_dragged = false;
+                    return;
+                };
+                if window != self.active {
+                    self.focus(window);
+                }
+                self.editor_mut().mouse_click(row, col);
+                self.mouse_anchor = Some((window, row, col));
+                self.mouse_dragged = false;
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some((anchor_window, anchor_row, anchor_col)) = self.mouse_anchor else {
+                    return;
+                };
+                let Some((window, row, col)) = target else {
+                    return;
+                };
+                if window != anchor_window {
+                    return;
+                }
+                if self.active != window {
+                    self.focus(window);
+                }
+                self.editor_mut()
+                    .mouse_select((anchor_row, anchor_col), (row, col));
+                self.mouse_dragged = true;
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if self.mouse_dragged {
+                    if let (
+                        Some((anchor_window, anchor_row, anchor_col)),
+                        Some((window, row, col)),
+                    ) = (self.mouse_anchor, target)
+                    {
+                        if window == anchor_window {
+                            if self.active != window {
+                                self.focus(window);
+                            }
+                            self.editor_mut()
+                                .mouse_select((anchor_row, anchor_col), (row, col));
+                        }
+                    }
+                }
+                self.mouse_anchor = None;
+                self.mouse_dragged = false;
+            }
+            _ => {}
+        }
+    }
+
     pub fn paste(&mut self, text: &str) {
         if self.terminal_input() {
             if let Some(build) = &mut self.build {
@@ -1171,7 +1242,9 @@ impl Workspace {
 mod tests {
     use super::*;
     use crate::buffer::Buffer;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind,
+    };
 
     fn key(w: &mut Workspace, ch: char) {
         w.key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
@@ -1523,6 +1596,38 @@ mod tests {
         key(&mut w, 'c');
         assert!(w.editor().message.contains("No comments"));
         assert!(w.pending_keys.is_empty());
+    }
+
+    #[test]
+    fn real_mouse_drag_selection_reaches_multiline_gcc() {
+        let mut w = Workspace::new(
+            Buffer::from_text("alpha\nbeta\ngamma\ndelta"),
+            PathBuf::from("."),
+        );
+        w.editor_mut().buffer.path = Some(PathBuf::from("test.c"));
+
+        w.mouse(
+            Some((0, 0, 2)),
+            MouseEventKind::Down(MouseButton::Left),
+        );
+        w.mouse(
+            Some((0, 2, 1)),
+            MouseEventKind::Drag(MouseButton::Left),
+        );
+        w.mouse(
+            Some((0, 2, 1)),
+            MouseEventKind::Up(MouseButton::Left),
+        );
+
+        assert!(matches!(w.editor().mode, Mode::Visual(_)));
+        for ch in ['g', 'c', 'c'] {
+            key(&mut w, ch);
+        }
+        assert_eq!(
+            w.editor().buffer.body(),
+            "// alpha\n// beta\n// gamma\ndelta"
+        );
+        assert_eq!(w.editor().mode, Mode::Normal);
     }
 
     #[test]

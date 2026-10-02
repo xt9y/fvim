@@ -91,6 +91,188 @@ impl Renderer {
         self.cursor = None;
     }
 
+    fn character_at_display_column(
+        line: &str,
+        target: usize,
+        tabstop: usize,
+    ) -> usize {
+        let mut display = 0;
+        for (index, ch) in line.chars().enumerate() {
+            let end = display + char_width(ch, display, tabstop);
+            if target < end {
+                return index;
+            }
+            display = end;
+        }
+        line.chars().count()
+    }
+
+    fn buffer_position(
+        &self,
+        editor: &Editor,
+        size: (u16, u16),
+        x: u16,
+        y: u16,
+        pane: bool,
+    ) -> Option<(usize, usize)> {
+        if editor.terminal.is_some() || size.0 == 0 || size.1 == 0 {
+            return None;
+        }
+
+        let s = &editor.settings;
+        let command = if editor.prompt.is_some() || !editor.message.is_empty() {
+            editor.command_line()
+        } else if s.showmode && editor.mode != Mode::Normal {
+            format!("-- {} --", editor.mode_name())
+        } else {
+            String::new()
+        };
+        let commands = if pane {
+            0
+        } else {
+            s.cmdheight
+                .max(usize::from(!command.is_empty()))
+                .min(size.1 as usize)
+        };
+        let status = usize::from(s.laststatus >= 2 && size.1 as usize > commands + 1);
+        let rows = size.1 as usize - commands - status;
+        if y as usize >= rows {
+            return None;
+        }
+
+        let b = &editor.buffer;
+        let digits = b.lines.len().to_string().len();
+        let number_width = if s.number || s.relativenumber {
+            s.numberwidth.max(digits + 1)
+        } else {
+            0
+        };
+        let signs = if s.signcolumn
+            || (s.sign_auto
+                && !editor.diagnostics.is_empty()
+                && s.tooling.diagnostics.signs)
+        {
+            2
+        } else {
+            0
+        };
+        let columns = size.0 as usize;
+        let gutter = (number_width + signs).min(columns.saturating_sub(1));
+        let text_width = columns.saturating_sub(gutter);
+        if text_width == 0 {
+            return None;
+        }
+
+        let local_x = x as usize;
+        let (row, display) = if !s.wrap {
+            let row = self.top.saturating_add(y as usize);
+            if row >= b.lines.len() {
+                return None;
+            }
+            let display = if local_x < gutter {
+                0
+            } else {
+                self.left.saturating_add(local_x - gutter)
+            };
+            (row, display)
+        } else {
+            let mut row = self.top.min(b.lines.len().saturating_sub(1));
+            let mut segment = self.segment;
+            for _ in 0..y {
+                let chunks = segments(
+                    &b.lines[row],
+                    text_width,
+                    s,
+                    editor.mode == Mode::Insert && row == b.row,
+                );
+                if segment + 1 < chunks.len() {
+                    segment += 1;
+                } else {
+                    if row + 1 >= b.lines.len() {
+                        return None;
+                    }
+                    row += 1;
+                    segment = 0;
+                }
+            }
+            let chunks = segments(
+                &b.lines[row],
+                text_width,
+                s,
+                editor.mode == Mode::Insert && row == b.row,
+            );
+            let chunk = *chunks.get(segment)?;
+            let display = if local_x < gutter {
+                chunk.0
+            } else {
+                chunk.0.saturating_add(local_x - gutter).min(chunk.1)
+            };
+            (row, display)
+        };
+
+        let mut col =
+            Self::character_at_display_column(&b.lines[row], display, s.tabstop);
+        let length = b.lines[row].chars().count();
+        if editor.mode != Mode::Insert {
+            col = col.min(length.saturating_sub(1));
+        } else {
+            col = col.min(length);
+        }
+        Some((row, col))
+    }
+
+    pub fn workspace_position(
+        &self,
+        workspace: &crate::workspace::Workspace,
+        size: (u16, u16),
+        x: u16,
+        y: u16,
+    ) -> Option<(usize, usize, usize)> {
+        if workspace.picker.is_some() {
+            return None;
+        }
+        if workspace.windows.iter().flatten().count() == 1 {
+            let (row, col) = self.buffer_position(workspace.editor(), size, x, y, false)?;
+            return Some((workspace.active, row, col));
+        }
+
+        let commands = workspace
+            .settings
+            .cmdheight
+            .max(usize::from(!workspace.editor().command_line().is_empty()))
+            .max(1)
+            .min(size.1 as usize);
+        let rects =
+            workspace.rectangles(size.0, size.1.saturating_sub(commands as u16));
+        for (id, rect) in rects {
+            if x < rect.x
+                || y < rect.y
+                || x >= rect.x.saturating_add(rect.width)
+                || y >= rect.y.saturating_add(rect.height)
+            {
+                continue;
+            }
+            let border = u16::from(
+                rect.x + rect.width < size.0 && rect.width > 1,
+            );
+            let pane_width = rect.width.saturating_sub(border);
+            if x >= rect.x.saturating_add(pane_width) {
+                return None;
+            }
+            let window = workspace.windows[id].as_ref()?;
+            let editor = &workspace.buffers[window.buffer];
+            let (row, col) = window.renderer.buffer_position(
+                editor,
+                (pane_width, rect.height),
+                x - rect.x,
+                y - rect.y,
+                true,
+            )?;
+            return Some((id, row, col));
+        }
+        None
+    }
+
     pub(crate) fn prepare(&mut self, editor: &Editor, size: (u16, u16)) -> Option<Update> {
         self.prepare_inner(editor, size, false)
     }
@@ -981,6 +1163,32 @@ mod tests {
     use super::*;
     use crate::buffer::Buffer;
     use crate::editor::{Editor, Mode, Visual};
+
+    #[test]
+    fn mouse_hit_testing_maps_screen_cells_to_buffer_rows_and_columns() {
+        let mut editor = Editor::new(crate::buffer::Buffer::from_text(
+            "abcdef\nuvwxyz\nthird",
+        ));
+        editor.settings.number = true;
+        editor.settings.relativenumber = true;
+        editor.settings.numberwidth = 4;
+        editor.settings.signcolumn = true;
+
+        let mut renderer = Renderer::default();
+        renderer.prepare(&editor, (30, 8)).unwrap();
+        let gutter = 6;
+        assert_eq!(
+            renderer.buffer_position(&editor, (30, 8), gutter + 3, 1, false),
+            Some((1, 3))
+        );
+
+        editor.mode = Mode::Insert;
+        renderer.prepare(&editor, (30, 8)).unwrap();
+        assert_eq!(
+            renderer.buffer_position(&editor, (30, 8), gutter + 20, 1, false),
+            Some((1, 6))
+        );
+    }
 
     #[test]
     fn diagnostics_use_severity_signs_underlines_virtual_text_and_rounded_popup() {

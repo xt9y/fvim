@@ -240,6 +240,39 @@ impl Editor {
         self.clamp();
     }
 
+    pub(crate) fn mouse_click(&mut self, row: usize, col: usize) {
+        let insert = self.mode == Mode::Insert;
+        self.goal = None;
+        self.reset_command();
+        self.recording.clear();
+        self.mode = if insert { Mode::Insert } else { Mode::Normal };
+        self.buffer.row = row.min(self.buffer.lines.len().saturating_sub(1));
+        let length = self.buffer.lines[self.buffer.row].chars().count();
+        self.buffer.col = if insert {
+            col.min(length)
+        } else {
+            col.min(length.saturating_sub(1))
+        };
+    }
+
+    pub(crate) fn mouse_select(
+        &mut self,
+        anchor: (usize, usize),
+        cursor: (usize, usize),
+    ) {
+        self.goal = None;
+        self.reset_command();
+        self.recording.clear();
+        let anchor_row = anchor.0.min(self.buffer.lines.len().saturating_sub(1));
+        let anchor_len = self.buffer.lines[anchor_row].chars().count();
+        self.anchor = (anchor_row, anchor.1.min(anchor_len.saturating_sub(1)));
+        self.mode = Mode::Visual(Visual::Character);
+        let row = cursor.0.min(self.buffer.lines.len().saturating_sub(1));
+        let length = self.buffer.lines[row].chars().count();
+        self.buffer.row = row;
+        self.buffer.col = cursor.1.min(length.saturating_sub(1));
+    }
+
     pub fn toggle_comment(
         &mut self,
         line: &str,
@@ -1610,6 +1643,31 @@ mod tests {
         e.buffer.col = 1;
         keys(&mut e, "vj");
         assert_eq!(e.clipboard_text(), "lpha\nbe");
+    }
+
+    #[test]
+    fn mouse_character_selection_comments_every_touched_row() {
+        let mut e = editor("alpha\nbeta\ngamma\ndelta");
+        e.buffer.path = Some(std::path::PathBuf::from("test.c"));
+
+        e.mouse_click(0, 2);
+        e.mouse_select((0, 2), (2, 1));
+        assert!(matches!(e.mode, Mode::Visual(Visual::Character)));
+        keys(&mut e, "gcc");
+
+        assert_eq!(e.buffer.body(), "// alpha\n// beta\n// gamma\ndelta");
+        assert_eq!(e.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn mouse_click_preserves_insert_mode_and_moves_row_and_column() {
+        let mut e = editor("alpha\nbeta\ngamma");
+        keys(&mut e, "i");
+        e.mouse_click(1, 3);
+        assert_eq!(e.mode, Mode::Insert);
+        assert_eq!((e.buffer.row, e.buffer.col), (1, 3));
+        keys(&mut e, "X");
+        assert_eq!(e.buffer.body(), "alpha\nbetXa\ngamma");
     }
 
     #[test]

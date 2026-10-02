@@ -18,8 +18,8 @@ use buffer::Buffer;
 use crossterm::{
     cursor::{Hide, SetCursorStyle, Show},
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
-        KeyModifiers,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+        EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
     },
     execute,
     style::{Attribute, ResetColor, SetAttribute},
@@ -42,6 +42,7 @@ impl Terminal {
             io::stdout(),
             EnterAlternateScreen,
             EnableBracketedPaste,
+            EnableMouseCapture,
             Hide
         )?;
         Ok(guard)
@@ -56,6 +57,7 @@ impl Drop for Terminal {
             SetCursorStyle::DefaultUserShape,
             SetAttribute(Attribute::Reset),
             Show,
+            DisableMouseCapture,
             DisableBracketedPaste,
             LeaveAlternateScreen
         );
@@ -157,6 +159,12 @@ fn edit(path: Option<PathBuf>) -> io::Result<()> {
                 }
             }
             Event::Paste(text) => workspace.paste(&text),
+            Event::Mouse(mouse) => {
+                let size = terminal::size()?;
+                let target =
+                    renderer.workspace_position(&workspace, size, mouse.column, mouse.row);
+                workspace.mouse(target, mouse.kind);
+            }
             Event::Resize(..) | Event::FocusGained => renderer.invalidate(),
             _ => redraw = false,
         }
