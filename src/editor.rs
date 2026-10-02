@@ -255,11 +255,7 @@ impl Editor {
         };
     }
 
-    pub(crate) fn mouse_select(
-        &mut self,
-        anchor: (usize, usize),
-        cursor: (usize, usize),
-    ) {
+    pub(crate) fn mouse_select(&mut self, anchor: (usize, usize), cursor: (usize, usize)) {
         self.goal = None;
         self.reset_command();
         self.recording.clear();
