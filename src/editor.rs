@@ -36,7 +36,8 @@ enum Input {
 #[derive(Clone, Copy)]
 enum Pending {
     G,
-    Comment(bool),
+    VisualG(usize, usize),
+    Comment(bool, usize, usize),
     Find(char),
     Object(bool),
     Register,
@@ -252,6 +253,18 @@ impl Editor {
         } else {
             (self.buffer.row, self.buffer.row)
         };
+        self.toggle_comment_rows(line, block, start, end)
+    }
+
+    fn toggle_comment_rows(
+        &mut self,
+        line: &str,
+        block: Option<(&str, &str)>,
+        start: usize,
+        end: usize,
+    ) -> Result<(), String> {
+        let start = start.min(self.buffer.lines.len().saturating_sub(1));
+        let end = end.min(self.buffer.lines.len().saturating_sub(1)).max(start);
         let old = self.buffer.lines[start..=end].join("\n");
         let new = if let Some((open, close)) = block {
             if open.is_empty() || close.is_empty() {
@@ -928,11 +941,14 @@ impl Editor {
                 }
                 Pending::G => match ch {
                     'g' => self.apply_motion('g'),
-                    'c' => self.pending = Some(Pending::Comment(false)),
-                    'b' => self.pending = Some(Pending::Comment(true)),
                     _ => self.reset_command(),
                 },
-                Pending::Comment(block) => {
+                Pending::VisualG(start, end) => match ch {
+                    'c' => self.pending = Some(Pending::Comment(false, start, end)),
+                    'b' => self.pending = Some(Pending::Comment(true, start, end)),
+                    _ => self.reset_command(),
+                },
+                Pending::Comment(block, start, end) => {
                     if ch != 'c' {
                         self.reset_command();
                         return;
@@ -943,9 +959,11 @@ impl Editor {
                         self.reset_command();
                         return;
                     };
-                    let result = self.toggle_comment(
+                    let result = self.toggle_comment_rows(
                         &syntax.0,
                         block.then_some((syntax.1.as_str(), syntax.2.as_str())),
+                        start,
+                        end,
                     );
                     if let Err(error) = result {
                         self.message = error;
@@ -1005,7 +1023,14 @@ impl Editor {
             return;
         }
         if ch == 'g' {
-            self.pending = Some(Pending::G);
+            if matches!(self.mode, Mode::Visual(_)) {
+                self.pending = Some(Pending::VisualG(
+                    self.anchor.0.min(self.buffer.row),
+                    self.anchor.0.max(self.buffer.row),
+                ));
+            } else {
+                self.pending = Some(Pending::G);
+            }
             return;
         }
         if matches!(ch, 'f' | 'F' | 't' | 'T') {
@@ -1605,6 +1630,26 @@ mod tests {
         assert!(matches!(e.mode, Mode::Visual(Visual::Line)));
         keys(&mut e, "c");
         assert_eq!(e.buffer.body(), "/* alpha\nbeta */\ngamma");
+        assert_eq!(e.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn visual_gcc_snapshots_every_selected_row_before_the_key_sequence_finishes() {
+        let mut e = editor("alpha\nbeta\ngamma\ndelta");
+        e.buffer.path = Some(std::path::PathBuf::from("test.c"));
+
+        keys(&mut e, "Vjjg");
+        assert!(matches!(e.mode, Mode::Visual(Visual::Line)));
+
+        // A redraw/input path is allowed to move the live cursor while the multi-key
+        // command is pending. gcc must still apply to the rows selected when g began.
+        e.buffer.row = e.anchor.0;
+        keys(&mut e, "cc");
+
+        assert_eq!(
+            e.buffer.body(),
+            "// alpha\n// beta\n// gamma\ndelta"
+        );
         assert_eq!(e.mode, Mode::Normal);
     }
 

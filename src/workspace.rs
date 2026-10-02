@@ -410,6 +410,7 @@ impl Workspace {
                 )?)
             }
             "config" => self.open(Some(self.config_dir.join("init.lua")))?,
+            "preconfig" => self.open(Some(self.config_dir.join("pre_configured.lua")))?,
             "filetype" => {
                 let settings = self.settings.for_path(self.editor().buffer.path.as_deref());
                 self.editor_mut().settings = settings;
@@ -1199,6 +1200,36 @@ mod tests {
 
         key(&mut w, ' ');
         assert!(w.completion_allowed.is_none());
+    }
+
+    #[test]
+    fn pc_opens_preconfigured_lua_and_cc_still_opens_init_lua() {
+        let dir = std::env::temp_dir().join(format!("fvim-config-keys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("pre_configured.lua"), "-- defaults").unwrap();
+        std::fs::write(dir.join("init.lua"), "-- personal").unwrap();
+
+        let mut w = Workspace::new(Buffer::from_text(""), dir.clone());
+        key(&mut w, 'p');
+        key(&mut w, 'c');
+        assert!(w
+            .editor()
+            .buffer
+            .path
+            .as_ref()
+            .is_some_and(|path| path.ends_with("pre_configured.lua")));
+
+        key(&mut w, 'c');
+        key(&mut w, 'c');
+        assert!(w
+            .editor()
+            .buffer
+            .path
+            .as_ref()
+            .is_some_and(|path| path.ends_with("init.lua")));
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

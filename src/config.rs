@@ -532,6 +532,7 @@ fn read_settings(lua: &Lua) -> Result<Settings, String> {
                 | "split"
                 | "make"
                 | "config"
+                | "preconfig"
                 | "comment"
                 | "blockcomment"
                 | "bnext"

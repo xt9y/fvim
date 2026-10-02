@@ -72,6 +72,7 @@ vim.keymap.set('n', 'hh', 'vsplit')
 vim.keymap.set('n', 'vv', 'split')
 vim.keymap.set('n', 'mm', 'make')
 vim.keymap.set('n', 'cc', 'config')
+vim.keymap.set('n', 'pc', 'preconfig')
 vim.keymap.set('n', 'gcc', 'comment')
 vim.keymap.set('n', 'gbc', 'blockcomment')
 vim.filetype.add { extension = {
