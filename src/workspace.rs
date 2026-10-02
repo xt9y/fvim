@@ -120,6 +120,7 @@ pub struct Workspace {
     pending_at: Instant,
     window_prefix: bool,
     discard_armed: bool,
+    completion_allowed: Option<(usize, u64, usize, usize)>,
 }
 
 impl Workspace {
@@ -158,6 +159,7 @@ impl Workspace {
             pending_at: Instant::now(),
             window_prefix: false,
             discard_armed: false,
+            completion_allowed: None,
         }
     }
     pub fn editor(&self) -> &Editor {
@@ -174,6 +176,7 @@ impl Workspace {
         self.versions.clear();
         self.diagnostics.clear();
         self.statuses.clear();
+        self.completion_allowed = None;
         self.settings = settings;
         for editor in &mut self.buffers {
             editor.settings = self.settings.for_path(editor.buffer.path.as_deref());
@@ -831,8 +834,11 @@ impl Workspace {
             if key.modifiers.contains(KeyModifiers::CONTROL)
                 && matches!(key.code, KeyCode::Null | KeyCode::Char(' '))
             {
+                let id = self.windows[self.active].as_ref().unwrap().buffer;
                 let e = self.editor();
                 if let Some(path) = e.buffer.path.clone() {
+                    self.completion_allowed =
+                        Some((id, e.buffer.revision, e.buffer.row, e.buffer.col));
                     self.tools
                         .request(path, e.buffer.row, e.buffer.col, "textDocument/completion");
                 }
@@ -927,7 +933,20 @@ impl Workspace {
             }
         }
         let inserting = self.editor().mode == Mode::Insert;
+        let typed_completion_character = inserting
+            && key.modifiers.is_empty()
+            && matches!(key.code, KeyCode::Char(ch) if !ch.is_whitespace());
         let quit = self.editor_mut().key(key);
+        if inserting {
+            let id = self.windows[self.active].as_ref().unwrap().buffer;
+            if typed_completion_character && self.editor().mode == Mode::Insert {
+                let e = self.editor();
+                self.completion_allowed =
+                    Some((id, e.buffer.revision, e.buffer.row, e.buffer.col));
+            } else {
+                self.completion_allowed = None;
+            }
+        }
         if inserting && self.editor().mode == Mode::Normal {
             self.refresh_diagnostics();
         }
