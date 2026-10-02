@@ -546,7 +546,15 @@ impl Workspace {
                 p.flush_pending();
             }
         }
+        let keep_visual_mapping_prefix = matches!(self.editor().mode, Mode::Visual(_))
+            && !self.pending_keys.is_empty()
+            && self.settings.keymaps.iter().any(|mapping| {
+                mapping.mode == "v"
+                    && mapping.keys.len() > self.pending_keys.len()
+                    && mapping.keys.starts_with(&self.pending_keys)
+            });
         if !self.pending_keys.is_empty()
+            && !keep_visual_mapping_prefix
             && self.pending_at.elapsed().as_millis() >= self.settings.mapping_timeout as u128
         {
             self.flush_keys()
@@ -681,7 +689,7 @@ impl Workspace {
         items
     }
 
-    fn prompt_search_items(&self, prefix: &str) -> Vec<PromptCompletionItem> {
+    fn prompt_words(&self, prefix: &str) -> Vec<String> {
         if prefix.is_empty() || !prefix.chars().all(|ch| ch.is_alphanumeric() || ch == '_') {
             return vec![];
         }
@@ -707,10 +715,65 @@ impl Workspace {
         }
         words.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
         words
+    }
+
+    fn prompt_search_items(&self, prefix: &str) -> Vec<PromptCompletionItem> {
+        self.prompt_words(prefix)
             .into_iter()
             .map(|word| PromptCompletionItem {
                 label: format!("[syntax] {word}"),
                 value: word,
+                directory: false,
+            })
+            .collect()
+    }
+
+    fn prompt_substitute_items(&self, text: &str) -> Vec<PromptCompletionItem> {
+        let mut chars = text.char_indices().peekable();
+        let mut fragment = None;
+        while let Some((_, ch)) = chars.next() {
+            if ch != 's' {
+                continue;
+            }
+            let Some((delimiter_index, delimiter)) = chars.peek().copied() else {
+                continue;
+            };
+            if delimiter.is_alphanumeric() || delimiter.is_whitespace() {
+                continue;
+            }
+            let start = delimiter_index + delimiter.len_utf8();
+            let body = &text[start..];
+            let mut escaped = false;
+            let mut closed = false;
+            for ch in body.chars() {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if ch == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if ch == delimiter {
+                    closed = true;
+                    break;
+                }
+            }
+            if closed {
+                return vec![];
+            }
+            fragment = Some((start, body));
+            break;
+        }
+        let Some((start, prefix)) = fragment else {
+            return vec![];
+        };
+        let head = &text[..start];
+        self.prompt_words(prefix)
+            .into_iter()
+            .map(|word| PromptCompletionItem {
+                label: format!("[syntax] {word}"),
+                value: format!("{head}{word}"),
                 directory: false,
             })
             .collect()
@@ -727,7 +790,12 @@ impl Workspace {
             return;
         };
         let items = if kind == ':' {
-            self.prompt_path_items(&text)
+            let paths = self.prompt_path_items(&text);
+            if paths.is_empty() {
+                self.prompt_substitute_items(&text)
+            } else {
+                paths
+            }
         } else if matches!(kind, '/' | '?') {
             self.prompt_search_items(&text)
         } else {
@@ -740,47 +808,42 @@ impl Workspace {
     }
 
     fn prompt_completion_key(&mut self, key: KeyEvent) -> Option<bool> {
-        if !key.modifiers.is_empty() {
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+        {
             return None;
         }
-        match key.code {
-            KeyCode::Up | KeyCode::Down => {
-                let menu = self.editor_mut().prompt_completion.as_mut()?;
-                let reverse = key.code == KeyCode::Up;
-                menu.selected = Some(match menu.selected {
-                    None => {
-                        if reverse {
-                            menu.items.len() - 1
-                        } else {
-                            0
-                        }
-                    }
-                    Some(index) if reverse => (index + menu.items.len() - 1) % menu.items.len(),
-                    Some(index) => (index + 1) % menu.items.len(),
-                });
-                Some(false)
+        let reverse = match key.code {
+            KeyCode::BackTab => true,
+            KeyCode::Tab => key.modifiers.contains(KeyModifiers::SHIFT),
+            _ => return None,
+        };
+        let item = {
+            let menu = self.editor_mut().prompt_completion.as_mut()?;
+            if menu.items.is_empty() {
+                return None;
             }
-            KeyCode::Enter => {
-                let item = {
-                    let menu = self.editor().prompt_completion.as_ref()?;
-                    menu.selected
-                        .and_then(|index| menu.items.get(index))
-                        .cloned()?
-                };
-                self.editor_mut().prompt.as_mut().unwrap().text = item.value;
-                self.editor_mut().prompt_completion = None;
-                if item.directory {
-                    self.refresh_prompt_completion();
-                    Some(false)
-                } else {
-                    None
-                }
-            }
-            _ => None,
+            let index = match menu.selected {
+                None if reverse => menu.items.len() - 1,
+                None => 0,
+                Some(index) if reverse => (index + menu.items.len() - 1) % menu.items.len(),
+                Some(index) => (index + 1) % menu.items.len(),
+            };
+            menu.selected = Some(index);
+            menu.items[index].clone()
+        };
+        self.editor_mut().prompt.as_mut().unwrap().text = item.value;
+        if item.directory {
+            self.refresh_prompt_completion();
         }
+        Some(false)
     }
 
     pub fn key(&mut self, key: KeyEvent) -> bool {
+        if key.kind == KeyEventKind::Release {
+            return false;
+        }
         self.last_input = Instant::now();
         self.editor_mut().popup = None;
         if self.terminal_input() {
@@ -1164,7 +1227,9 @@ mod tests {
         let menu = w.editor().prompt_completion.as_ref().unwrap();
         assert!(menu.items.iter().any(|item| item.value == "e src/main.c"));
 
-        w.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        w.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(w.editor().prompt.as_ref().unwrap().text, "e src/main.c");
+        assert!(w.editor().prompt.is_some());
         w.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(w
             .editor()
@@ -1189,9 +1254,38 @@ mod tests {
         assert!(menu.items.iter().any(|item| item.value == "alphaThing"));
         assert!(menu.items.iter().any(|item| item.value == "alphaOther"));
 
-        w.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        w.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let first = w.editor().prompt.as_ref().unwrap().text.clone();
+        assert!(matches!(first.as_str(), "alphaThing" | "alphaOther"));
+        assert!(w.editor().prompt.is_some());
+        w.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let second = w.editor().prompt.as_ref().unwrap().text.clone();
+        assert!(matches!(second.as_str(), "alphaThing" | "alphaOther"));
+        assert_ne!(first, second);
         w.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(w.editor().prompt.is_none());
+    }
+
+    #[test]
+    fn substitute_prompt_cycles_search_words_directly_with_tab() {
+        let mut w = Workspace::new(
+            Buffer::from_text("alphaThing beta alphaOther"),
+            PathBuf::from("."),
+        );
+        for ch in ":%s/alp".chars() {
+            key(&mut w, ch);
+        }
+        let menu = w.editor().prompt_completion.as_ref().unwrap();
+        assert!(menu.items.iter().any(|item| item.value == "%s/alphaThing"));
+        assert!(menu.items.iter().any(|item| item.value == "%s/alphaOther"));
+
+        w.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let first = w.editor().prompt.as_ref().unwrap().text.clone();
+        assert!(matches!(first.as_str(), "%s/alphaThing" | "%s/alphaOther"));
+        w.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let second = w.editor().prompt.as_ref().unwrap().text.clone();
+        assert!(matches!(second.as_str(), "%s/alphaThing" | "%s/alphaOther"));
+        assert_ne!(first, second);
     }
 
     #[test]
@@ -1387,6 +1481,45 @@ mod tests {
 
         assert_eq!(w.editor().buffer.body(), "// alpha\n// beta\ngamma");
         assert_eq!(w.editor().mode, Mode::Normal);
+    }
+
+    #[test]
+    fn release_events_do_not_replay_visual_mapping_prefixes() {
+        let mut w = Workspace::new(Buffer::from_text("alpha\nbeta\ngamma"), PathBuf::from("."));
+        w.editor_mut().buffer.path = Some(PathBuf::from("test.c"));
+        key(&mut w, 'V');
+        key(&mut w, 'j');
+
+        for ch in ['g', 'c', 'c'] {
+            w.key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+            w.key(KeyEvent {
+                code: KeyCode::Char(ch),
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Release,
+                state: KeyEventState::NONE,
+            });
+        }
+
+        assert_eq!(w.editor().buffer.body(), "// alpha\n// beta\ngamma");
+        assert_eq!(w.editor().mode, Mode::Normal);
+    }
+
+    #[test]
+    fn visual_mapping_prefix_does_not_timeout_out_of_the_selection() {
+        let mut w = Workspace::new(Buffer::from_text("alpha\nbeta\ngamma"), PathBuf::from("."));
+        w.editor_mut().buffer.path = Some(PathBuf::from("test.c"));
+        w.settings.mapping_timeout = 0;
+        key(&mut w, 'V');
+        key(&mut w, 'j');
+        key(&mut w, 'g');
+
+        assert!(!w.timeout());
+        assert!(matches!(w.editor().mode, Mode::Visual(_)));
+        assert_eq!(w.pending_keys.len(), 1);
+
+        key(&mut w, 'c');
+        key(&mut w, 'c');
+        assert_eq!(w.editor().buffer.body(), "// alpha\n// beta\ngamma");
     }
 
     #[test]

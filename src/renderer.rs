@@ -138,6 +138,9 @@ impl Renderer {
         let rows = usize::from(height) - commands - status;
         let columns = usize::from(width);
         let b = &editor.buffer;
+        let prompt_regex = editor
+            .prompt_search_pattern()
+            .and_then(|pattern| crate::command::compile(pattern, None).ok());
         let digits = b.lines.len().to_string().len();
         let number_width = if s.number || s.relativenumber {
             s.numberwidth.max(digits + 1)
@@ -299,8 +302,20 @@ impl Renderer {
                         + editor.semantic[semantic_start..].partition_point(|span| span.row == row);
                     let syntax = &editor.syntax[syntax_start..syntax_end];
                     let semantic = &editor.semantic[semantic_start..semantic_end];
+                    let prompt_matches = prompt_regex.as_ref().map_or_else(Vec::new, |regex| {
+                        regex
+                            .find_iter(text)
+                            .filter_map(|matched| {
+                                let start = text[..matched.start()].chars().count();
+                                let end =
+                                    start + text[matched.start()..matched.end()].chars().count();
+                                (start < end).then_some((start, end))
+                            })
+                            .collect::<Vec<_>>()
+                    });
                     let mut syntax_index = 0usize;
                     let mut semantic_index = 0usize;
+                    let mut prompt_index = 0usize;
                     line.append(Line::styled_visible(
                         text,
                         left,
@@ -343,6 +358,21 @@ impl Renderer {
                                 };
                                 if let Some(snippet) = s.highlights.get(group).copied() {
                                     style = snippet.over(style);
+                                }
+                            }
+                            while prompt_index < prompt_matches.len()
+                                && prompt_matches[prompt_index].1 <= col
+                            {
+                                prompt_index += 1;
+                            }
+                            if prompt_matches
+                                .get(prompt_index)
+                                .is_some_and(|(start, end)| *start <= col && col < *end)
+                            {
+                                if let Some(active) =
+                                    s.highlights.get("SnippetPlaceholderActive").copied()
+                                {
+                                    style = active.over(style);
                                 }
                             }
                             if editor.selected(row, col) {
@@ -862,31 +892,6 @@ fn overlays(
 ) {
     let s = &editor.settings;
     let (items, rounded) = if let Some(menu) = editor
-        .prompt_completion
-        .as_ref()
-        .filter(|_| editor.prompt.is_some())
-    {
-        (
-            menu.items
-                .iter()
-                .enumerate()
-                .skip(
-                    menu.selected
-                        .unwrap_or(0)
-                        .saturating_sub(s.tooling.popup_height - 1),
-                )
-                .take(s.tooling.popup_height)
-                .map(|(i, item)| {
-                    format!(
-                        "{} {}",
-                        if menu.selected == Some(i) { ">" } else { " " },
-                        item.label
-                    )
-                })
-                .collect::<Vec<_>>(),
-            false,
-        )
-    } else if let Some(menu) = editor
         .completion
         .as_ref()
         .filter(|_| editor.mode == Mode::Insert)
@@ -1128,6 +1133,59 @@ mod tests {
             .spans
             .iter()
             .any(|(_, style)| style.bg == inactive.bg));
+    }
+
+    #[test]
+    fn search_and_substitute_prompts_preview_matches_with_active_snippet_color() {
+        let mut e = Editor::new(Buffer::from_text("alpha beta alpha"));
+        let active = Highlight {
+            bg: Some((1, 2, 3)),
+            ..Highlight::default()
+        };
+        e.settings
+            .highlights
+            .insert("SnippetPlaceholderActive".into(), active);
+
+        let mut r = Renderer::default();
+        e.prompt = Some(crate::editor::Prompt {
+            kind: '/',
+            text: "alpha".into(),
+        });
+        r.prepare(&e, (40, 8));
+        assert!(r.lines[0]
+            .spans
+            .iter()
+            .any(|(_, style)| style.bg == active.bg));
+
+        e.prompt = Some(crate::editor::Prompt {
+            kind: ':',
+            text: "%s/alpha/replacement/g".into(),
+        });
+        r.prepare(&e, (40, 8));
+        assert!(r.lines[0]
+            .spans
+            .iter()
+            .any(|(_, style)| style.bg == active.bg));
+    }
+
+    #[test]
+    fn prompt_completion_does_not_render_a_popup() {
+        let mut e = Editor::new(Buffer::from_text("alpha beta"));
+        e.prompt = Some(crate::editor::Prompt {
+            kind: '/',
+            text: "alp".into(),
+        });
+        e.prompt_completion = Some(crate::editor::PromptCompletionMenu {
+            items: vec![crate::editor::PromptCompletionItem {
+                label: "[syntax] alpha".into(),
+                value: "alpha".into(),
+                directory: false,
+            }],
+            selected: Some(0),
+        });
+        let mut r = Renderer::default();
+        r.prepare(&e, (40, 8));
+        assert!(!r.lines.iter().any(|line| line.text.contains("[syntax]")));
     }
 
     #[test]

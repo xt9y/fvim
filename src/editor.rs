@@ -322,6 +322,54 @@ impl Editor {
         }
     }
 
+    pub(crate) fn prompt_search_pattern(&self) -> Option<&str> {
+        let prompt = self.prompt.as_ref()?;
+        if matches!(prompt.kind, '/' | '?') {
+            return (!prompt.text.is_empty()).then_some(prompt.text.as_str());
+        }
+        if prompt.kind != ':' {
+            return None;
+        }
+        let (_, _, rest, _) = crate::command::range(
+            &prompt.text,
+            self.buffer.row,
+            self.buffer.lines.len(),
+            self.visual_range,
+        )
+        .ok()?;
+        if !rest.starts_with('s')
+            || rest
+                .chars()
+                .nth(1)
+                .is_some_and(|ch| ch.is_ascii_alphabetic())
+        {
+            return None;
+        }
+        let tail = &rest[1..];
+        let delimiter = tail.chars().next()?;
+        if delimiter.is_alphanumeric() || delimiter.is_whitespace() {
+            return None;
+        }
+        let body = &tail[delimiter.len_utf8()..];
+        let mut escaped = false;
+        let mut end = body.len();
+        for (index, ch) in body.char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == delimiter {
+                end = index;
+                break;
+            }
+        }
+        (end > 0).then_some(&body[..end])
+    }
+
     pub(crate) fn activate_snippet(&mut self, mut stops: Vec<SnippetStop>) {
         stops.sort_by_key(|stop| (stop.index == 0, stop.index, stop.start));
         stops.dedup_by_key(|stop| stop.index);
