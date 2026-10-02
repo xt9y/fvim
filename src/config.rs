@@ -365,7 +365,7 @@ impl Config {
         exec(&lua, defaults, "pre_configured.lua")?;
         exec(
             &lua,
-            "for key,value in pairs(fvim._shipped_keymaps) do if fvim.keymaps[key]==nil then fvim.keymaps[key]=value end end; for filetype,value in pairs(fvim._shipped_comments) do if fvim.comments[filetype]==nil then fvim.comments[filetype]=value end end",
+            "for key,value in pairs(fvim._shipped_keymaps) do if fvim.keymaps[key]==nil then fvim.keymaps[key]=value end end; local legacy={['v:gcc']='comment',['v:gbc']='blockcomment'}; for key,action in pairs(legacy) do local mapping=fvim.keymaps[key]; if mapping and mapping.action==action then fvim.keymaps[key]=nil end end; for filetype,value in pairs(fvim._shipped_comments) do if fvim.comments[filetype]==nil then fvim.comments[filetype]=value end end",
             "native compatibility defaults",
         )?;
         read_settings(&lua).map_err(|e| format!("pre_configured.lua: {e}"))?;
@@ -855,34 +855,37 @@ mod tests {
     }
 
     #[test]
-    fn older_installed_defaults_inherit_visual_comment_mappings_and_comment_syntax() {
-        let old = "fvim.keymaps={}; fvim.comments={}; vim.opt.number=true";
+    fn older_installed_defaults_migrate_visual_comments_to_native_commands() {
+        let old = "fvim.keymaps={}; fvim.comments={}; vim.opt.number=true; vim.keymap.set('v','gcc','comment'); vim.keymap.set('v','gbc','blockcomment')";
         let c = Config::from_scripts(old, "").unwrap();
         let gcc = parse_keys("gcc").unwrap();
         let gbc = parse_keys("gbc").unwrap();
-        assert!(c.settings.keymaps.iter().any(|mapping| mapping.mode == "v"
+        assert!(c.settings.keymaps.iter().any(|mapping| mapping.mode == "n"
             && mapping.keys == gcc
             && mapping.action == "comment"));
         assert!(c.settings.keymaps.iter().any(|mapping| {
-            mapping.mode == "v" && mapping.keys == gbc && mapping.action == "blockcomment"
+            mapping.mode == "n" && mapping.keys == gbc && mapping.action == "blockcomment"
         }));
-        assert_eq!(c.settings.comments.get("c").unwrap().0, "//");
-
-        let c = Config::from_scripts(
-            old,
-            "vim.keymap.del('v','gcc'); vim.keymap.set('v','gc','comment')",
-        )
-        .unwrap();
         assert!(!c
             .settings
             .keymaps
             .iter()
-            .any(|mapping| mapping.mode == "v" && mapping.keys == gcc));
+            .any(|mapping| mapping.mode == "v" && matches!(mapping.action.as_str(), "comment" | "blockcomment")));
+        assert_eq!(c.settings.comments.get("c").unwrap().0, "//");
+
+        let c = Config::from_scripts(old, "vim.keymap.set('v','gc','comment')").unwrap();
         assert!(c
             .settings
             .keymaps
             .iter()
             .any(|mapping| mapping.mode == "v" && mapping.keys == parse_keys("gc").unwrap()));
+
+        let c = Config::from_scripts(old, "vim.keymap.set('v','gcc','comment')").unwrap();
+        assert!(c
+            .settings
+            .keymaps
+            .iter()
+            .any(|mapping| mapping.mode == "v" && mapping.keys == gcc));
     }
 
     #[test]

@@ -99,30 +99,6 @@ fn mapping_key(mut key: KeyEvent) -> KeyEvent {
     key
 }
 
-fn native_comment_mapping(keys: &[KeyEvent]) -> Option<Option<&'static str>> {
-    let typed = keys
-        .iter()
-        .map(|key| {
-            if !key.modifiers.is_empty() {
-                return None;
-            }
-            match key.code {
-                KeyCode::Char(ch) => Some(ch),
-                _ => None,
-            }
-        })
-        .collect::<Option<Vec<_>>>()?;
-    for (sequence, action) in [
-        (['g', 'c', 'c'], "comment"),
-        (['g', 'b', 'c'], "blockcomment"),
-    ] {
-        if sequence.as_slice().starts_with(typed.as_slice()) {
-            return Some((typed.len() == sequence.len()).then_some(action));
-        }
-    }
-    None
-}
-
 pub struct Workspace {
     pub buffers: Vec<Editor>,
     pub windows: Vec<Option<Window>>,
@@ -581,11 +557,8 @@ impl Workspace {
                     && mapping.keys.len() > self.pending_keys.len()
                     && mapping.keys.starts_with(&self.pending_keys)
             });
-        let keep_native_comment_prefix =
-            native_comment_mapping(&self.pending_keys).is_some_and(|action| action.is_none());
         if !self.pending_keys.is_empty()
             && !keep_mapping_prefix
-            && !keep_native_comment_prefix
             && self.pending_at.elapsed().as_millis() >= self.settings.mapping_timeout as u128
         {
             self.flush_keys()
@@ -1058,13 +1031,6 @@ impl Workspace {
                     let action = m.action.clone();
                     self.pending_keys.clear();
                     return self.action(&action);
-                }
-                return false;
-            }
-            if let Some(native) = native_comment_mapping(&self.pending_keys) {
-                if let Some(action) = native {
-                    self.pending_keys.clear();
-                    return self.action(action);
                 }
                 return false;
             }
@@ -1618,9 +1584,16 @@ mod tests {
     }
 
     #[test]
-    fn visual_mapping_prefix_does_not_timeout_out_of_the_selection() {
+    fn native_visual_comment_prefix_never_enters_mapping_timeout() {
         let mut w = Workspace::new(Buffer::from_text("alpha\nbeta\ngamma"), PathBuf::from("."));
         w.editor_mut().buffer.path = Some(PathBuf::from("test.c"));
+        w.settings
+            .keymaps
+            .retain(|mapping| mapping.mode != "v");
+        w.editor_mut()
+            .settings
+            .keymaps
+            .retain(|mapping| mapping.mode != "v");
         w.settings.mapping_timeout = 0;
         key(&mut w, 'V');
         key(&mut w, 'j');
@@ -1628,9 +1601,11 @@ mod tests {
 
         assert!(!w.timeout());
         assert!(matches!(w.editor().mode, Mode::Visual(_)));
-        assert_eq!(w.pending_keys.len(), 1);
+        assert!(w.pending_keys.is_empty());
 
         key(&mut w, 'c');
+        assert!(matches!(w.editor().mode, Mode::Visual(_)));
+        assert!(!w.timeout());
         key(&mut w, 'c');
         assert_eq!(w.editor().buffer.body(), "// alpha\n// beta\ngamma");
     }

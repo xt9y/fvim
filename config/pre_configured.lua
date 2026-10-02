@@ -74,8 +74,6 @@ vim.keymap.set('n', 'mm', 'make')
 vim.keymap.set('n', 'cc', 'config')
 vim.keymap.set('n', 'gcc', 'comment')
 vim.keymap.set('n', 'gbc', 'blockcomment')
-vim.keymap.set('v', 'gcc', 'comment')
-vim.keymap.set('v', 'gbc', 'blockcomment')
 vim.filetype.add { extension = {
     c='c', h='c', cpp='cpp', hpp='cpp', cc='cpp', rs='rust',
     lua='lua', py='python', sh='sh', ll='llvm', llvm='llvm',

@@ -36,6 +36,7 @@ enum Input {
 #[derive(Clone, Copy)]
 enum Pending {
     G,
+    Comment(bool),
     Find(char),
     Object(bool),
     Register,
@@ -925,10 +926,29 @@ impl Editor {
                         self.reset_command();
                     }
                 }
-                Pending::G => {
-                    if ch == 'g' {
-                        self.apply_motion('g');
-                    } else {
+                Pending::G => match ch {
+                    'g' => self.apply_motion('g'),
+                    'c' => self.pending = Some(Pending::Comment(false)),
+                    'b' => self.pending = Some(Pending::Comment(true)),
+                    _ => self.reset_command(),
+                },
+                Pending::Comment(block) => {
+                    if ch != 'c' {
+                        self.reset_command();
+                        return;
+                    }
+                    let filetype = self.settings.filetype(self.buffer.path.as_deref());
+                    let Some(syntax) = self.settings.comments.get(&filetype).cloned() else {
+                        self.message = format!("No comments configured for {filetype}");
+                        self.reset_command();
+                        return;
+                    };
+                    let result = self.toggle_comment(
+                        &syntax.0,
+                        block.then_some((syntax.1.as_str(), syntax.2.as_str())),
+                    );
+                    if let Err(error) = result {
+                        self.message = error;
                         self.reset_command();
                     }
                 }
@@ -1563,6 +1583,29 @@ mod tests {
         e.buffer.col = 1;
         keys(&mut e, "vj");
         assert_eq!(e.clipboard_text(), "lpha\nbe");
+    }
+
+    #[test]
+    fn visual_gcc_and_gbc_are_native_pending_commands() {
+        let mut e = editor("alpha\nbeta\ngamma");
+        e.buffer.path = Some(std::path::PathBuf::from("test.c"));
+
+        keys(&mut e, "Vjg");
+        assert!(matches!(e.mode, Mode::Visual(Visual::Line)));
+        keys(&mut e, "c");
+        assert!(matches!(e.mode, Mode::Visual(Visual::Line)));
+        keys(&mut e, "c");
+        assert_eq!(e.buffer.body(), "// alpha\n// beta\ngamma");
+        assert_eq!(e.mode, Mode::Normal);
+
+        keys(&mut e, "u");
+        e.buffer.row = 0;
+        e.buffer.col = 0;
+        keys(&mut e, "Vjgb");
+        assert!(matches!(e.mode, Mode::Visual(Visual::Line)));
+        keys(&mut e, "c");
+        assert_eq!(e.buffer.body(), "/* alpha\nbeta */\ngamma");
+        assert_eq!(e.mode, Mode::Normal);
     }
 
     #[test]
