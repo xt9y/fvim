@@ -276,11 +276,7 @@ impl Workspace {
                             if e.mode == Mode::Insert
                                 && self.completion_allowed.is_some_and(
                                     |(buffer, revision, active_row, active_col)| {
-                                        buffer
-                                            == self.windows[self.active]
-                                                .as_ref()
-                                                .unwrap()
-                                                .buffer
+                                        buffer == self.windows[self.active].as_ref().unwrap().buffer
                                             && revision == e.buffer.revision
                                             && active_row == row
                                             && active_col == col
