@@ -91,11 +91,7 @@ impl Renderer {
         self.cursor = None;
     }
 
-    fn character_at_display_column(
-        line: &str,
-        target: usize,
-        tabstop: usize,
-    ) -> usize {
+    fn character_at_display_column(line: &str, target: usize, tabstop: usize) -> usize {
         let mut display = 0;
         for (index, ch) in line.chars().enumerate() {
             let end = display + char_width(ch, display, tabstop);
@@ -148,9 +144,7 @@ impl Renderer {
             0
         };
         let signs = if s.signcolumn
-            || (s.sign_auto
-                && !editor.diagnostics.is_empty()
-                && s.tooling.diagnostics.signs)
+            || (s.sign_auto && !editor.diagnostics.is_empty() && s.tooling.diagnostics.signs)
         {
             2
         } else {
@@ -210,8 +204,7 @@ impl Renderer {
             (row, display)
         };
 
-        let mut col =
-            Self::character_at_display_column(&b.lines[row], display, s.tabstop);
+        let mut col = Self::character_at_display_column(&b.lines[row], display, s.tabstop);
         let length = b.lines[row].chars().count();
         if editor.mode != Mode::Insert {
             col = col.min(length.saturating_sub(1));
@@ -242,8 +235,7 @@ impl Renderer {
             .max(usize::from(!workspace.editor().command_line().is_empty()))
             .max(1)
             .min(size.1 as usize);
-        let rects =
-            workspace.rectangles(size.0, size.1.saturating_sub(commands as u16));
+        let rects = workspace.rectangles(size.0, size.1.saturating_sub(commands as u16));
         for (id, rect) in rects {
             if x < rect.x
                 || y < rect.y
@@ -252,9 +244,7 @@ impl Renderer {
             {
                 continue;
             }
-            let border = u16::from(
-                rect.x + rect.width < size.0 && rect.width > 1,
-            );
+            let border = u16::from(rect.x + rect.width < size.0 && rect.width > 1);
             let pane_width = rect.width.saturating_sub(border);
             if x >= rect.x.saturating_add(pane_width) {
                 return None;
@@ -1166,9 +1156,7 @@ mod tests {
 
     #[test]
     fn mouse_hit_testing_maps_screen_cells_to_buffer_rows_and_columns() {
-        let mut editor = Editor::new(crate::buffer::Buffer::from_text(
-            "abcdef\nuvwxyz\nthird",
-        ));
+        let mut editor = Editor::new(crate::buffer::Buffer::from_text("abcdef\nuvwxyz\nthird"));
         editor.settings.number = true;
         editor.settings.relativenumber = true;
         editor.settings.numberwidth = 4;
