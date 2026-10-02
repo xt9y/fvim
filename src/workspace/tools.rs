@@ -50,7 +50,7 @@ impl Workspace {
                         e.buffer
                             .path
                             .as_ref()
-                            .is_some_and(|stored| tooling::uri(p) == tooling::uri(stored))
+                            .is_some_and(|stored| tooling::same_path(p, stored))
                     })
                 })
                 .cloned()
@@ -148,7 +148,7 @@ impl Workspace {
             }
             e.semantic.clear();
             self.tool_version += 1;
-            let absolute = tooling::from_uri(&tooling::uri(path)).unwrap_or_else(|| path.clone());
+            let absolute = tooling::normalized_path(path);
             self.versions.insert(absolute.clone(), self.tool_version);
             self.synced.insert(
                 id,
@@ -170,7 +170,7 @@ impl Workspace {
                 self.saved_generations.insert(id, e.buffer.save_generation);
             }
         }
-        for event in self.tools.poll() {
+        while let Some(event) = self.tools.try_event() {
             match event {
                 Event::Semantic {
                     path,
@@ -251,7 +251,7 @@ impl Workspace {
                     if e.buffer
                         .path
                         .as_ref()
-                        .is_none_or(|p| tooling::uri(p) != tooling::uri(&path))
+                        .is_none_or(|p| !tooling::same_path(p, &path))
                     {
                         continue;
                     }
