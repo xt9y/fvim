@@ -102,7 +102,7 @@ pub struct Workspace {
     terminal_window: Option<usize>,
     diagnostics: HashMap<(PathBuf, String), Vec<crate::diagnostics::Diagnostic>>,
     synced: HashMap<usize, (u64, PathBuf, u64, bool)>,
-    versions: HashMap<String, u64>,
+    versions: HashMap<PathBuf, u64>,
     tool_version: u64,
     last_input: Instant,
     statuses: Vec<String>,
