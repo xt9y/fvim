@@ -1151,11 +1151,7 @@ impl Workspace {
             self.buffers[id].terminal = Some(build.screen().clone());
         }
     }
-    pub fn mouse(
-        &mut self,
-        target: Option<(usize, usize, usize)>,
-        kind: MouseEventKind,
-    ) {
+    pub fn mouse(&mut self, target: Option<(usize, usize, usize)>, kind: MouseEventKind) {
         self.last_input = Instant::now();
         self.completion_allowed = None;
         self.pending_keys.clear();
@@ -1242,9 +1238,7 @@ impl Workspace {
 mod tests {
     use super::*;
     use crate::buffer::Buffer;
-    use crossterm::event::{
-        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind,
-    };
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 
     fn key(w: &mut Workspace, ch: char) {
         w.key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
@@ -1606,18 +1600,9 @@ mod tests {
         );
         w.editor_mut().buffer.path = Some(PathBuf::from("test.c"));
 
-        w.mouse(
-            Some((0, 0, 2)),
-            MouseEventKind::Down(MouseButton::Left),
-        );
-        w.mouse(
-            Some((0, 2, 1)),
-            MouseEventKind::Drag(MouseButton::Left),
-        );
-        w.mouse(
-            Some((0, 2, 1)),
-            MouseEventKind::Up(MouseButton::Left),
-        );
+        w.mouse(Some((0, 0, 2)), MouseEventKind::Down(MouseButton::Left));
+        w.mouse(Some((0, 2, 1)), MouseEventKind::Drag(MouseButton::Left));
+        w.mouse(Some((0, 2, 1)), MouseEventKind::Up(MouseButton::Left));
 
         assert!(matches!(w.editor().mode, Mode::Visual(_)));
         for ch in ['g', 'c', 'c'] {
