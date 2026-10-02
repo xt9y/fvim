@@ -5,8 +5,6 @@ use crate::{
 };
 use serde_json::Value;
 
-
-
 impl Workspace {
     pub(super) fn diagnostic_entries(&self) -> Vec<crate::picker::Entry> {
         let mut items: Vec<_> = self.diagnostics.values().flatten().collect();
