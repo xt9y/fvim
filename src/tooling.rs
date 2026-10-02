@@ -43,6 +43,13 @@ pub fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
+pub fn path_key(path: &Path) -> String {
+    let mut key = uri(&normalized_path(path));
+    #[cfg(windows)]
+    key.make_ascii_lowercase();
+    key
+}
+
 pub fn uri(path: &Path) -> String {
     let path = if path.is_absolute() {
         path.to_owned()
@@ -1085,9 +1092,14 @@ mod tests {
             "/repo/file.c"
         });
         assert!(same_path(&plain, &plain));
+        assert_eq!(path_key(&plain), path_key(&normalized_path(&plain)));
         #[cfg(windows)]
         {
             assert_eq!(normalized_path(Path::new(r"\\?\C:\repo\file.c")), plain);
+            assert_eq!(
+                path_key(Path::new(r"\\?\C:\repo\file.c")),
+                path_key(Path::new(r"C:\repo\file.c"))
+            );
             assert!(same_path(Path::new(r"\\?\C:\Repo\FILE.c"), &plain));
             assert_eq!(
                 normalized_path(Path::new(r"\\?\UNC\server\share\file.c")),
