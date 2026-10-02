@@ -1,12 +1,12 @@
 use crate::config::Settings;
+#[cfg(windows)]
+use std::time::{Duration, Instant};
 use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
     thread,
 };
-#[cfg(windows)]
-use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
