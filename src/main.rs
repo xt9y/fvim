@@ -91,7 +91,7 @@ fn edit(path: Option<PathBuf>) -> io::Result<()> {
             renderer.draw_workspace(&mut workspace, size, &mut out)?;
         }
         redraw = true;
-        if !event::poll(std::time::Duration::from_millis(2))? {
+        if pending_input.is_none() && !event::poll(std::time::Duration::from_millis(2))? {
             let pending = workspace.has_pending_input();
             if workspace.timeout() {
                 return Ok(());
