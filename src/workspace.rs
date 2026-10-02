@@ -1249,6 +1249,30 @@ mod tests {
     }
 
     #[test]
+    fn legacy_installed_config_still_runs_visual_gcc_without_dropping_selection() {
+        let settings = crate::config::Config::from_scripts(
+            "fvim.keymaps={}; fvim.comments={}; vim.opt.number=true",
+            "",
+        )
+        .unwrap()
+        .settings;
+        let mut w = Workspace::new(Buffer::from_text("alpha\nbeta\ngamma"), PathBuf::from("."));
+        w.editor_mut().buffer.path = Some(PathBuf::from("legacy.c"));
+        w.apply_settings(settings);
+
+        key(&mut w, 'V');
+        key(&mut w, 'j');
+        key(&mut w, 'g');
+        assert!(matches!(w.editor().mode, Mode::Visual(_)));
+        key(&mut w, 'c');
+        assert!(matches!(w.editor().mode, Mode::Visual(_)));
+        key(&mut w, 'c');
+
+        assert_eq!(w.editor().buffer.body(), "// alpha\n// beta\ngamma");
+        assert_eq!(w.editor().mode, Mode::Normal);
+    }
+
+    #[test]
     fn visual_mapping_ignores_terminal_key_metadata() {
         let mut w = Workspace::new(Buffer::from_text("alpha\nbeta\ngamma"), PathBuf::from("."));
         w.editor_mut().buffer.path = Some(PathBuf::from("test.c"));
