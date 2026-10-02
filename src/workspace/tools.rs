@@ -127,6 +127,7 @@ impl Workspace {
             }
         }
         let idle = self.last_input.elapsed().as_millis() >= self.settings.tooling.delay_ms as u128;
+        let completion_allowed = self.completion_allowed;
         for (id, e) in self.buffers.iter_mut().enumerate() {
             let Some(path) = &e.buffer.path else {
                 continue;
@@ -159,11 +160,14 @@ impl Workspace {
                 version: self.tool_version,
                 text: e.buffer.text().replace("\r\n", "\n"),
                 filetype: self.settings.filetype(Some(path)),
-                cursor: if e.mode == Mode::Insert {
-                    Some((e.buffer.row, e.buffer.col))
-                } else {
-                    None
-                },
+                cursor: completion_allowed
+                    .filter(|(buffer, revision, row, col)| {
+                        *buffer == id
+                            && *revision == e.buffer.revision
+                            && *row == e.buffer.row
+                            && *col == e.buffer.col
+                    })
+                    .map(|(_, _, row, col)| (row, col)),
             });
             if self.saved_generations.get(&id).copied().unwrap_or(0) != e.buffer.save_generation {
                 self.tools.saved(path.clone());
@@ -266,7 +270,17 @@ impl Workspace {
                         continue;
                     }
                     match method.as_str() {
-                        "textDocument/completion" if e.mode == Mode::Insert => {
+                        "textDocument/completion"
+                            if e.mode == Mode::Insert
+                                && self.completion_allowed.is_some_and(
+                                    |(buffer, revision, active_row, active_col)| {
+                                        buffer == self.windows[self.active].as_ref().unwrap().buffer
+                                            && revision == e.buffer.revision
+                                            && active_row == row
+                                            && active_col == col
+                                    },
+                                ) =>
+                        {
                             let items = completion_items(e, &value, row, col);
                             if !items.is_empty() {
                                 self.editor_mut().completion = Some(CompletionMenu {

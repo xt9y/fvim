@@ -862,6 +862,31 @@ fn overlays(
 ) {
     let s = &editor.settings;
     let (items, rounded) = if let Some(menu) = editor
+        .prompt_completion
+        .as_ref()
+        .filter(|_| editor.prompt.is_some())
+    {
+        (
+            menu.items
+                .iter()
+                .enumerate()
+                .skip(
+                    menu.selected
+                        .unwrap_or(0)
+                        .saturating_sub(s.tooling.popup_height - 1),
+                )
+                .take(s.tooling.popup_height)
+                .map(|(i, item)| {
+                    format!(
+                        "{} {}",
+                        if menu.selected == Some(i) { ">" } else { " " },
+                        item.label
+                    )
+                })
+                .collect::<Vec<_>>(),
+            false,
+        )
+    } else if let Some(menu) = editor
         .completion
         .as_ref()
         .filter(|_| editor.mode == Mode::Insert)
