@@ -6,7 +6,10 @@ use crate::{
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use std::collections::{HashMap, HashSet};
-use std::{path::{Path, PathBuf}, time::Instant};
+use std::{
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Axis {
@@ -589,8 +592,16 @@ impl Workspace {
         let mut seen = HashSet::new();
         let mut items = Vec::new();
 
-        let current = self.editor().buffer.path.as_ref().map(|p| self.prompt_path_value(p));
-        if let Some(value) = current.as_ref().filter(|value| value.to_lowercase().starts_with(&needle)) {
+        let current = self
+            .editor()
+            .buffer
+            .path
+            .as_ref()
+            .map(|p| self.prompt_path_value(p));
+        if let Some(value) = current
+            .as_ref()
+            .filter(|value| value.to_lowercase().starts_with(&needle))
+        {
             seen.insert(value.clone());
             items.push(PromptCompletionItem {
                 label: format!("[current] {value}"),
@@ -623,7 +634,11 @@ impl Workspace {
                 .unwrap_or_else(|| self.root.clone())
                 .join(rest)
         } else {
-            let path = PathBuf::from(if directory_text.is_empty() { "." } else { directory_text });
+            let path = PathBuf::from(if directory_text.is_empty() {
+                "."
+            } else {
+                directory_text
+            });
             if path.is_absolute() {
                 path
             } else {
@@ -633,7 +648,10 @@ impl Workspace {
         let fragment = fragment.to_lowercase();
         let mut filesystem = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&directory_path) {
-            for entry in entries.flatten().take(self.settings.picker_max_files.min(2000)) {
+            for entry in entries
+                .flatten()
+                .take(self.settings.picker_max_files.min(2000))
+            {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if !name.to_lowercase().starts_with(&fragment) {
                     continue;
@@ -730,7 +748,13 @@ impl Workspace {
                 let menu = self.editor_mut().prompt_completion.as_mut()?;
                 let reverse = key.code == KeyCode::Up;
                 menu.selected = Some(match menu.selected {
-                    None => if reverse { menu.items.len() - 1 } else { 0 },
+                    None => {
+                        if reverse {
+                            menu.items.len() - 1
+                        } else {
+                            0
+                        }
+                    }
                     Some(index) if reverse => (index + menu.items.len() - 1) % menu.items.len(),
                     Some(index) => (index + 1) % menu.items.len(),
                 });
@@ -739,7 +763,9 @@ impl Workspace {
             KeyCode::Enter => {
                 let item = {
                     let menu = self.editor().prompt_completion.as_ref()?;
-                    menu.selected.and_then(|index| menu.items.get(index)).cloned()?
+                    menu.selected
+                        .and_then(|index| menu.items.get(index))
+                        .cloned()?
                 };
                 self.editor_mut().prompt.as_mut().unwrap().text = item.value;
                 self.editor_mut().prompt_completion = None;
@@ -855,7 +881,8 @@ impl Workspace {
                 };
                 if let Some(path) = path {
                     self.completion_allowed = Some((id, revision, row, col));
-                    self.tools.request(path, row, col, "textDocument/completion");
+                    self.tools
+                        .request(path, row, col, "textDocument/completion");
                 }
                 return false;
             }
@@ -1121,8 +1148,14 @@ mod tests {
             key(&mut w, ch);
         }
         let menu = w.editor().prompt_completion.as_ref().unwrap();
-        assert!(menu.items.iter().any(|item| item.label.contains("[current] second.c")));
-        assert!(menu.items.iter().any(|item| item.label.contains("[dir] src/")));
+        assert!(menu
+            .items
+            .iter()
+            .any(|item| item.label.contains("[current] second.c")));
+        assert!(menu
+            .items
+            .iter()
+            .any(|item| item.label.contains("[dir] src/")));
 
         key(&mut w, 'r');
         key(&mut w, 'c');
