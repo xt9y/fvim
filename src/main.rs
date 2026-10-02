@@ -103,9 +103,9 @@ fn edit(path: Option<PathBuf>) -> io::Result<()> {
             event::read()?
         };
         if workspace.terminal_input() {
-            if let Event::Key(key) = input {
-                if batchable_terminal_key(key) {
-                    let mut bytes = terminal_key(key);
+            if let Event::Key(key) = &input {
+                if batchable_terminal_key(*key) {
+                    let mut bytes = terminal_key(*key);
                     while event::poll(std::time::Duration::from_millis(1))? {
                         let next = event::read()?;
                         match next {
