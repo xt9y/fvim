@@ -729,6 +729,13 @@ impl Workspace {
         }
         false
     }
+    pub fn terminal_write(&mut self, bytes: &[u8]) {
+        self.last_input = Instant::now();
+        if let Some(build) = &mut self.build {
+            let _ = build.input(bytes);
+        }
+    }
+
     pub fn terminal_input(&self) -> bool {
         self.editor().terminal.is_some()
             && self.editor().mode == Mode::Insert
