@@ -264,7 +264,9 @@ impl Editor {
         end: usize,
     ) -> Result<(), String> {
         let start = start.min(self.buffer.lines.len().saturating_sub(1));
-        let end = end.min(self.buffer.lines.len().saturating_sub(1)).max(start);
+        let end = end
+            .min(self.buffer.lines.len().saturating_sub(1))
+            .max(start);
         let old = self.buffer.lines[start..=end].join("\n");
         let new = if let Some((open, close)) = block {
             if open.is_empty() || close.is_empty() {
@@ -1646,10 +1648,7 @@ mod tests {
         e.buffer.row = e.anchor.0;
         keys(&mut e, "cc");
 
-        assert_eq!(
-            e.buffer.body(),
-            "// alpha\n// beta\n// gamma\ndelta"
-        );
+        assert_eq!(e.buffer.body(), "// alpha\n// beta\n// gamma\ndelta");
         assert_eq!(e.mode, Mode::Normal);
     }
 
