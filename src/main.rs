@@ -18,8 +18,8 @@ use buffer::Buffer;
 use crossterm::{
     cursor::{Hide, SetCursorStyle, Show},
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
-        EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEventKind, KeyModifiers,
     },
     execute,
     style::{Attribute, ResetColor, SetAttribute},
@@ -161,8 +161,7 @@ fn edit(path: Option<PathBuf>) -> io::Result<()> {
             Event::Paste(text) => workspace.paste(&text),
             Event::Mouse(mouse) => {
                 let size = terminal::size()?;
-                let target =
-                    renderer.workspace_position(&workspace, size, mouse.column, mouse.row);
+                let target = renderer.workspace_position(&workspace, size, mouse.column, mouse.row);
                 workspace.mouse(target, mouse.kind);
             }
             Event::Resize(..) | Event::FocusGained => renderer.invalidate(),
