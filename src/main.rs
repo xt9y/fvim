@@ -64,7 +64,9 @@ impl Drop for Terminal {
 
 fn batchable_terminal_key(key: crossterm::event::KeyEvent) -> bool {
     key.kind != KeyEventKind::Release
-        && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
         && matches!(key.code, KeyCode::Char(_) | KeyCode::Enter)
 }
 
@@ -252,11 +254,26 @@ mod terminal_tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         };
-        assert!(batchable_terminal_key(key(KeyCode::Char('x'), KeyModifiers::NONE)));
-        assert!(batchable_terminal_key(key(KeyCode::Char('X'), KeyModifiers::SHIFT)));
-        assert!(batchable_terminal_key(key(KeyCode::Enter, KeyModifiers::NONE)));
-        assert!(!batchable_terminal_key(key(KeyCode::Char('q'), KeyModifiers::CONTROL)));
-        assert!(!batchable_terminal_key(key(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(batchable_terminal_key(key(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE
+        )));
+        assert!(batchable_terminal_key(key(
+            KeyCode::Char('X'),
+            KeyModifiers::SHIFT
+        )));
+        assert!(batchable_terminal_key(key(
+            KeyCode::Enter,
+            KeyModifiers::NONE
+        )));
+        assert!(!batchable_terminal_key(key(
+            KeyCode::Char('q'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!batchable_terminal_key(key(
+            KeyCode::Esc,
+            KeyModifiers::NONE
+        )));
     }
 
     #[test]
