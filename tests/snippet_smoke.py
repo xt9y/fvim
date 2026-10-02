@@ -103,7 +103,7 @@ with tempfile.TemporaryDirectory(prefix="fvim-snippet-") as directory:
         expect(b"for (init; condition; inc) { statements }")
         assert time.monotonic() - completion_started < 0.25, "completion waited for updatetime"
         clear()
-        send(b"\t\r")
+        send(b"\x1b[B\r")
         expect(b"init-statement")
         clear()
         # Fill the first two placeholders, jump backward with Shift-Tab, replace
