@@ -99,6 +99,30 @@ fn mapping_key(mut key: KeyEvent) -> KeyEvent {
     key
 }
 
+fn native_comment_mapping(keys: &[KeyEvent]) -> Option<Option<&'static str>> {
+    let typed = keys
+        .iter()
+        .map(|key| {
+            if !key.modifiers.is_empty() {
+                return None;
+            }
+            match key.code {
+                KeyCode::Char(ch) => Some(ch),
+                _ => None,
+            }
+        })
+        .collect::<Option<Vec<_>>>()?;
+    for (sequence, action) in [
+        (['g', 'c', 'c'], "comment"),
+        (['g', 'b', 'c'], "blockcomment"),
+    ] {
+        if sequence.as_slice().starts_with(typed.as_slice()) {
+            return Some((typed.len() == sequence.len()).then_some(action));
+        }
+    }
+    None
+}
+
 pub struct Workspace {
     pub buffers: Vec<Editor>,
     pub windows: Vec<Option<Window>>,
@@ -546,15 +570,22 @@ impl Workspace {
                 p.flush_pending();
             }
         }
-        let keep_visual_mapping_prefix = matches!(self.editor().mode, Mode::Visual(_))
-            && !self.pending_keys.is_empty()
+        let mode = if self.editor().mode == Mode::Normal {
+            "n"
+        } else {
+            "v"
+        };
+        let keep_mapping_prefix = !self.pending_keys.is_empty()
             && self.settings.keymaps.iter().any(|mapping| {
-                mapping.mode == "v"
+                mapping.mode == mode
                     && mapping.keys.len() > self.pending_keys.len()
                     && mapping.keys.starts_with(&self.pending_keys)
             });
+        let keep_native_comment_prefix =
+            native_comment_mapping(&self.pending_keys).is_some_and(|action| action.is_none());
         if !self.pending_keys.is_empty()
-            && !keep_visual_mapping_prefix
+            && !keep_mapping_prefix
+            && !keep_native_comment_prefix
             && self.pending_at.elapsed().as_millis() >= self.settings.mapping_timeout as u128
         {
             self.flush_keys()
@@ -586,14 +617,16 @@ impl Workspace {
     }
 
     fn prompt_path_items(&self, text: &str) -> Vec<PromptCompletionItem> {
-        let Some((command, argument)) = text.split_once(char::is_whitespace) else {
-            return vec![];
+        let text = text.trim_start();
+        let (command, argument) = match text.find(char::is_whitespace) {
+            Some(index) => (&text[..index], text[index..].trim_start()),
+            None => (text, ""),
         };
-        if !matches!(command, "e" | "edit" | "sp" | "split" | "vs" | "vsplit") {
-            return vec![];
-        }
-        let argument = argument.trim_start();
-        if argument.is_empty() {
+        let bare_command = command.trim_end_matches('!');
+        if !matches!(
+            bare_command,
+            "e" | "edit" | "sp" | "split" | "vs" | "vsplit"
+        ) {
             return vec![];
         }
         let needle = argument.to_lowercase();
@@ -1028,6 +1061,13 @@ impl Workspace {
                 }
                 return false;
             }
+            if let Some(native) = native_comment_mapping(&self.pending_keys) {
+                if let Some(action) = native {
+                    self.pending_keys.clear();
+                    return self.action(action);
+                }
+                return false;
+            }
             // Replay the unmatched prefix through Vim, then allow the last key to start a new mapping.
             let last = self.pending_keys.pop().unwrap();
             if !self.pending_keys.is_empty() {
@@ -1237,6 +1277,79 @@ mod tests {
             .path
             .as_ref()
             .is_some_and(|path| path.ends_with("src/main.c")));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn edit_prompt_tabs_from_empty_argument_and_descends_directories() {
+        let root = std::env::temp_dir().join(format!(
+            "fvim-prompt-empty-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.c"), "int main;").unwrap();
+        std::fs::write(root.join("other.c"), "int other;").unwrap();
+
+        let mut w = Workspace::new(Buffer::from_text(""), PathBuf::from("."));
+        w.root = root.clone();
+
+        for ch in ":e".chars() {
+            key(&mut w, ch);
+        }
+        let menu = w.editor().prompt_completion.as_ref().unwrap();
+        assert!(menu.items.iter().any(|item| item.value == "e src/"));
+        assert!(menu.items.iter().any(|item| item.value == "e other.c"));
+
+        w.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(w.editor().prompt.as_ref().unwrap().text, "e src/");
+        let menu = w.editor().prompt_completion.as_ref().unwrap();
+        assert!(menu.items.iter().any(|item| item.value == "e src/main.c"));
+
+        w.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            w.editor().prompt.as_ref().unwrap().text,
+            "e src/main.c"
+        );
+        w.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(w
+            .editor()
+            .buffer
+            .path
+            .as_ref()
+            .is_some_and(|path| path.ends_with("src/main.c")));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn path_prompt_completion_works_before_typing_an_argument_for_all_open_commands() {
+        let root = std::env::temp_dir().join(format!(
+            "fvim-prompt-aliases-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("candidate.c"), "int candidate;").unwrap();
+
+        for command in ["e", "edit", "sp", "split", "vs", "vsplit", "e!", "edit!"] {
+            let mut w = Workspace::new(Buffer::from_text(""), PathBuf::from("."));
+            w.root = root.clone();
+            for ch in format!(":{command}").chars() {
+                key(&mut w, ch);
+            }
+            assert!(
+                w.editor()
+                    .prompt_completion
+                    .as_ref()
+                    .is_some_and(|menu| menu
+                        .items
+                        .iter()
+                        .any(|item| item.value == format!("{command} candidate.c"))),
+                "missing empty-argument completion for :{command}"
+            );
+        }
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1520,6 +1633,40 @@ mod tests {
         key(&mut w, 'c');
         key(&mut w, 'c');
         assert_eq!(w.editor().buffer.body(), "// alpha\n// beta\ngamma");
+    }
+
+    #[test]
+    fn visual_comments_work_without_any_configured_comment_keymaps() {
+        let mut w = Workspace::new(Buffer::from_text("alpha\nbeta\ngamma"), PathBuf::from("."));
+        w.editor_mut().buffer.path = Some(PathBuf::from("test.c"));
+        w.settings.keymaps.retain(|mapping| {
+            !matches!(mapping.action.as_str(), "comment" | "blockcomment")
+        });
+        w.editor_mut().settings.keymaps.retain(|mapping| {
+            !matches!(mapping.action.as_str(), "comment" | "blockcomment")
+        });
+        w.settings.mapping_timeout = 0;
+
+        key(&mut w, 'V');
+        key(&mut w, 'j');
+        key(&mut w, 'g');
+        assert!(matches!(w.editor().mode, Mode::Visual(_)));
+        assert!(!w.timeout());
+        key(&mut w, 'c');
+        assert!(matches!(w.editor().mode, Mode::Visual(_)));
+        assert!(!w.timeout());
+        key(&mut w, 'c');
+        assert_eq!(w.editor().buffer.body(), "// alpha\n// beta\ngamma");
+
+        key(&mut w, 'u');
+        w.editor_mut().buffer.row = 0;
+        w.editor_mut().buffer.col = 0;
+        key(&mut w, 'V');
+        key(&mut w, 'j');
+        for ch in ['g', 'b', 'c'] {
+            key(&mut w, ch);
+        }
+        assert_eq!(w.editor().buffer.body(), "/* alpha\nbeta */\ngamma");
     }
 
     #[test]
