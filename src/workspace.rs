@@ -945,6 +945,32 @@ mod tests {
     }
 
     #[test]
+    fn visual_gcc_and_gbc_toggle_multiple_lines_through_the_real_keymaps() {
+        let mut w = Workspace::new(Buffer::from_text("alpha\nbeta\ngamma"), PathBuf::from("."));
+        w.editor_mut().buffer.path = Some(PathBuf::from("test.c"));
+
+        key(&mut w, 'V');
+        key(&mut w, 'j');
+        key(&mut w, 'g');
+        key(&mut w, 'c');
+        key(&mut w, 'c');
+        assert_eq!(w.editor().buffer.body(), "// alpha\n// beta\ngamma");
+        key(&mut w, 'u');
+        assert_eq!(w.editor().buffer.body(), "alpha\nbeta\ngamma");
+
+        w.editor_mut().buffer.row = 0;
+        w.editor_mut().buffer.col = 0;
+        key(&mut w, 'V');
+        key(&mut w, 'j');
+        key(&mut w, 'g');
+        key(&mut w, 'b');
+        key(&mut w, 'c');
+        assert_eq!(w.editor().buffer.body(), "/* alpha\nbeta */\ngamma");
+        key(&mut w, 'u');
+        assert_eq!(w.editor().buffer.body(), "alpha\nbeta\ngamma");
+    }
+
+    #[test]
     fn split_shares_edits_but_keeps_independent_cursors_and_undo() {
         let mut w = Workspace::new(Buffer::from_text("alpha\nbeta"), PathBuf::from("."));
         w.command("vsplit").unwrap();

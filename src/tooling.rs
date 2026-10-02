@@ -15,13 +15,12 @@ use std::{
 };
 
 pub fn uri(path: &Path) -> String {
-    let path = std::fs::canonicalize(path).unwrap_or_else(|_| {
-        if path.is_absolute() {
-            path.to_owned()
-        } else {
-            std::env::current_dir().unwrap_or_default().join(path)
-        }
-    });
+    let path = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::fs::canonicalize(path)
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(path))
+    };
     let raw = path.to_string_lossy().replace('\\', "/");
     let raw = raw.strip_prefix("//?/").unwrap_or(&raw);
     let mut out = if raw.starts_with('/') {
@@ -72,6 +71,59 @@ pub fn utf16_col(line: &str, units: usize) -> usize {
 }
 pub fn to_utf16(line: &str, col: usize) -> usize {
     line.chars().take(col).map(char::len_utf16).sum()
+}
+
+fn lsp_position(text: &str, byte: usize) -> (usize, usize) {
+    let prefix = &text[..byte.min(text.len())];
+    let row = prefix.bytes().filter(|byte| *byte == b'\n').count();
+    let col = prefix
+        .rsplit('\n')
+        .next()
+        .unwrap_or("")
+        .encode_utf16()
+        .count();
+    (row, col)
+}
+
+fn incremental_change(old: &str, new: &str) -> Value {
+    if old == new {
+        let (row, character) = lsp_position(old, old.len());
+        return json!({
+            "range": {
+                "start": {"line": row, "character": character},
+                "end": {"line": row, "character": character}
+            },
+            "text": ""
+        });
+    }
+
+    let mut prefix = 0usize;
+    for (left, right) in old.chars().zip(new.chars()) {
+        if left != right {
+            break;
+        }
+        prefix += left.len_utf8();
+    }
+    let old_tail = &old[prefix..];
+    let new_tail = &new[prefix..];
+    let mut suffix = 0usize;
+    for (left, right) in old_tail.chars().rev().zip(new_tail.chars().rev()) {
+        if left != right {
+            break;
+        }
+        suffix += left.len_utf8();
+    }
+    let old_end = old.len() - suffix;
+    let new_end = new.len() - suffix;
+    let (start_row, start_col) = lsp_position(old, prefix);
+    let (end_row, end_col) = lsp_position(old, old_end);
+    json!({
+        "range": {
+            "start": {"line": start_row, "character": start_col},
+            "end": {"line": end_row, "character": end_col}
+        },
+        "text": &new[prefix..new_end]
+    })
 }
 pub fn compilation_database(path: &Path, root: &Path, explicit: Option<&Path>) -> Option<PathBuf> {
     if let Some(dir) = explicit {
@@ -293,6 +345,37 @@ enum Input {
     Exit(String, String),
     Stop,
 }
+
+type SyntaxTask = (u64, Document, bool);
+
+fn syntax_worker(input: Receiver<SyntaxTask>, output: Sender<(u64, Event)>) {
+    while let Ok(first) = input.recv() {
+        let mut pending = HashMap::new();
+        pending.insert(first.1.path.clone(), first);
+        while let Ok(task) = input.try_recv() {
+            pending.insert(task.1.path.clone(), task);
+        }
+        for (_, (epoch, document, enabled)) in pending {
+            let (spans, diagnostics) =
+                crate::syntax::analyze(&document.path, &document.filetype, &document.text, enabled);
+            if output
+                .send((
+                    epoch,
+                    Event::Syntax {
+                        path: document.path,
+                        version: document.version,
+                        spans,
+                        diagnostics,
+                    },
+                ))
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+}
+
 pub struct Tools {
     sender: Sender<Input>,
     receiver: Receiver<(u64, Event)>,
@@ -302,8 +385,17 @@ impl Tools {
     pub fn new(settings: ToolSettings) -> Self {
         let (sender, input) = mpsc::channel();
         let (output, receiver) = mpsc::channel();
+        let (syntax, syntax_input) = mpsc::channel();
+        let syntax_output = output.clone();
+        thread::Builder::new()
+            .name("fvim-syntax".into())
+            .spawn(move || syntax_worker(syntax_input, syntax_output))
+            .expect("spawn syntax worker");
         let reader_sender = sender.clone();
-        thread::spawn(move || Worker::new(settings, reader_sender, output).run(input));
+        thread::Builder::new()
+            .name("fvim-tooling".into())
+            .spawn(move || Worker::new(settings, reader_sender, output, syntax).run(input))
+            .expect("spawn tooling worker");
         Self {
             sender,
             receiver,
@@ -390,15 +482,7 @@ impl Session {
                 return;
             }
             let change = if self.incremental {
-                let row = old.text.bytes().filter(|b| *b == b'\n').count();
-                let col = old
-                    .text
-                    .rsplit('\n')
-                    .next()
-                    .unwrap_or("")
-                    .encode_utf16()
-                    .count();
-                json!({"range":{"start":{"line":0,"character":0},"end":{"line":row,"character":col}},"text":d.text})
+                incremental_change(&old.text, &d.text)
             } else {
                 json!({"text":d.text})
             };
@@ -451,13 +535,19 @@ struct Worker {
     settings: ToolSettings,
     sender: Sender<Input>,
     output: Output,
+    syntax: Sender<SyntaxTask>,
     sessions: HashMap<String, Session>,
     failed: Vec<String>,
     id: u64,
     epoch: u64,
 }
 impl Worker {
-    fn new(settings: ToolSettings, sender: Sender<Input>, output: Sender<(u64, Event)>) -> Self {
+    fn new(
+        settings: ToolSettings,
+        sender: Sender<Input>,
+        output: Sender<(u64, Event)>,
+        syntax: Sender<SyntaxTask>,
+    ) -> Self {
         Self {
             settings,
             sender,
@@ -465,6 +555,7 @@ impl Worker {
                 epoch: 0,
                 sender: output,
             },
+            syntax,
             sessions: HashMap::new(),
             failed: vec![],
             id: 10,
@@ -685,14 +776,7 @@ impl Worker {
                 Input::Document(d) => {
                     let enabled = self.settings.syntax
                         && (self.settings.languages.contains(&d.filetype) || d.filetype == "llvm");
-                    let (spans, diagnostics) =
-                        crate::syntax::analyze(&d.path, &d.filetype, &d.text, enabled);
-                    let _ = self.output.send(Event::Syntax {
-                        path: d.path.clone(),
-                        version: d.version,
-                        spans,
-                        diagnostics,
-                    });
+                    let _ = self.syntax.send((self.epoch, d.clone(), enabled));
                     let mut configs: Vec<_> = self
                         .settings
                         .servers
@@ -956,6 +1040,20 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn incremental_change_sends_only_the_changed_utf16_range() {
+        assert_eq!(
+            incremental_change("😀 value\nnext", "😀 value!\nnext"),
+            json!({
+                "range": {
+                    "start": {"line": 0, "character": 8},
+                    "end": {"line": 0, "character": 8}
+                },
+                "text": "!"
+            })
+        );
+    }
+
     #[test]
     fn json_rpc_framing_counts_utf8_bytes_and_accepts_extra_headers() {
         let value = serde_json::json!({"message":"界"});

@@ -61,7 +61,7 @@ impl Line {
         left: usize,
         width: usize,
         tabstop: usize,
-        style_at: impl Fn(usize) -> Highlight,
+        mut style_at: impl FnMut(usize) -> Highlight,
     ) -> Self {
         let mut out = Self::default();
         let mut column = 0;
@@ -101,12 +101,15 @@ impl Line {
     }
 
     pub(super) fn crop(&self, left: usize, width: usize, tabstop: usize) -> Self {
+        let mut positions = self.text.char_indices().enumerate().peekable();
         Self::styled_visible(&self.text, left, width, tabstop, |index| {
-            let byte = self
-                .text
-                .char_indices()
-                .nth(index)
-                .map_or(self.text.len(), |p| p.0);
+            while positions.peek().is_some_and(|(i, _)| *i < index) {
+                positions.next();
+            }
+            let byte = positions
+                .peek()
+                .filter(|(i, _)| *i == index)
+                .map_or(self.text.len(), |(_, (byte, _))| *byte);
             self.spans
                 .iter()
                 .rev()

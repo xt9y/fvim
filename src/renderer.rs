@@ -291,24 +291,37 @@ impl Renderer {
                 if text.is_empty() && editor.selected(row, 0) {
                     line.add(" ", visual);
                 } else {
+                    let syntax_start = editor.syntax.partition_point(|span| span.row < row);
+                    let syntax_end = syntax_start
+                        + editor.syntax[syntax_start..].partition_point(|span| span.row == row);
+                    let semantic_start = editor.semantic.partition_point(|span| span.row < row);
+                    let semantic_end = semantic_start
+                        + editor.semantic[semantic_start..].partition_point(|span| span.row == row);
+                    let syntax = &editor.syntax[syntax_start..syntax_end];
+                    let semantic = &editor.semantic[semantic_start..semantic_end];
+                    let mut syntax_index = 0usize;
+                    let mut semantic_index = 0usize;
                     line.append(Line::styled_visible(
                         text,
                         left,
                         visible_width,
                         s.tabstop,
                         |col| {
-                            let first = editor.syntax.partition_point(|span| span.row < row);
-                            let mut style = editor.syntax[first..]
-                                .iter()
-                                .take_while(|span| span.row == row)
-                                .find(|span| span.start <= col && col < span.end)
+                            while syntax_index < syntax.len() && syntax[syntax_index].end <= col {
+                                syntax_index += 1;
+                            }
+                            let mut style = syntax
+                                .get(syntax_index)
+                                .filter(|span| span.start <= col && col < span.end)
                                 .map_or(normal, |span| s.highlight(span.group));
-                            let semantic_first =
-                                editor.semantic.partition_point(|span| span.row < row);
-                            if let Some(span) = editor.semantic[semantic_first..]
-                                .iter()
-                                .take_while(|span| span.row == row)
-                                .find(|span| span.start <= col && col < span.end)
+                            while semantic_index < semantic.len()
+                                && semantic[semantic_index].end <= col
+                            {
+                                semantic_index += 1;
+                            }
+                            if let Some(span) = semantic
+                                .get(semantic_index)
+                                .filter(|span| span.start <= col && col < span.end)
                             {
                                 style = s.highlight(span.group);
                             }
@@ -320,6 +333,16 @@ impl Renderer {
                                     style.fg = diagnostic.fg;
                                     style.ctermfg = diagnostic.ctermfg;
                                     style.underline = true;
+                                }
+                            }
+                            if let Some(active) = editor.snippet_highlight(row, col) {
+                                let group = if active {
+                                    "SnippetPlaceholderActive"
+                                } else {
+                                    "SnippetPlaceholder"
+                                };
+                                if let Some(snippet) = s.highlights.get(group).copied() {
+                                    style = snippet.over(style);
                                 }
                             }
                             if editor.selected(row, col) {
@@ -1039,6 +1062,49 @@ mod tests {
             .iter()
             .any(|line| line.text.contains("> candidate8")));
     }
+    #[test]
+    fn snippet_stops_use_theme_specific_active_and_inactive_highlights() {
+        let mut e = Editor::new(Buffer::from_text("one two"));
+        e.mode = Mode::Insert;
+        let active = Highlight {
+            bg: Some((1, 2, 3)),
+            ..Highlight::default()
+        };
+        let inactive = Highlight {
+            bg: Some((4, 5, 6)),
+            ..Highlight::default()
+        };
+        e.settings
+            .highlights
+            .insert("SnippetPlaceholderActive".into(), active);
+        e.settings
+            .highlights
+            .insert("SnippetPlaceholder".into(), inactive);
+        e.activate_snippet(vec![
+            crate::editor::SnippetStop {
+                index: 1,
+                start: 0,
+                end: 3,
+            },
+            crate::editor::SnippetStop {
+                index: 2,
+                start: 4,
+                end: 7,
+            },
+        ]);
+
+        let mut r = Renderer::default();
+        r.prepare(&e, (40, 8));
+        assert!(r.lines[0]
+            .spans
+            .iter()
+            .any(|(_, style)| style.bg == active.bg));
+        assert!(r.lines[0]
+            .spans
+            .iter()
+            .any(|(_, style)| style.bg == inactive.bg));
+    }
+
     #[test]
     fn native_layout_uses_gutters_full_statusline_and_command_area() {
         let mut e = Editor::new(Buffer::from_text("alpha\nbeta\ngamma"));

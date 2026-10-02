@@ -51,7 +51,7 @@ with tempfile.TemporaryDirectory(prefix="fvim-snippet-") as directory:
     python = sys.executable.replace("\\", "/")
     fixture = str(FIXTURE).replace("\\", "/")
     with init.open("a", encoding="utf-8") as stream:
-        stream.write("\nvim.opt.updatetime=50\n")
+        stream.write("\nvim.opt.updatetime=500\n")
         stream.write("vim.lsp.config('clangd',{cmd={" + json.dumps(python) + "," + json.dumps(fixture) + "}})\n")
         stream.write("vim.lsp.enable({'zls','ols','slangd'}, false)\n")
 
@@ -97,9 +97,11 @@ with tempfile.TemporaryDirectory(prefix="fvim-snippet-") as directory:
     try:
         expect(b"snippet.c")
         clear()
+        completion_started = time.monotonic()
         send(b"iX")
         expect(b"for-loop")
         expect(b"for (init; condition; inc) { statements }")
+        assert time.monotonic() - completion_started < 0.25, "completion waited for updatetime"
         clear()
         send(b"\t\r")
         expect(b"init-statement")

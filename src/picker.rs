@@ -68,9 +68,8 @@ fn paths(root: &Path, settings: &Settings) -> Vec<PathBuf> {
     files
 }
 
-fn fuzzy(label: &str, query: &str) -> Option<usize> {
+fn fuzzy_folded(label: &str, query: &str) -> Option<usize> {
     let label = label.to_lowercase();
-    let query = query.to_lowercase();
     let mut offset = 0;
     let mut score = 0;
     for ch in query.chars() {
@@ -79,6 +78,11 @@ fn fuzzy(label: &str, query: &str) -> Option<usize> {
         offset += n + ch.len_utf8();
     }
     Some(score)
+}
+
+#[cfg(test)]
+fn fuzzy(label: &str, query: &str) -> Option<usize> {
+    fuzzy_folded(label, &query.to_lowercase())
 }
 
 fn search(
@@ -101,6 +105,7 @@ fn search(
         return (vec![], "Type a regular expression".into());
     }
     let mut ranked = vec![];
+    let folded_query = query.to_lowercase();
     for path in files {
         let label = path.strip_prefix(root).unwrap_or(path).to_string_lossy();
         if let Some(regex) = &regex {
@@ -140,7 +145,7 @@ fn search(
                     }
                 }
             }
-        } else if let Some(score) = fuzzy(&label, query) {
+        } else if let Some(score) = fuzzy_folded(&label, &folded_query) {
             ranked.push((
                 score,
                 Entry {
@@ -242,9 +247,10 @@ impl Picker {
     }
     fn refresh(&mut self) {
         if let Some(items) = &self.static_items {
+            let folded_query = self.query.to_lowercase();
             self.entries = items
                 .iter()
-                .filter(|e| fuzzy(&e.label, &self.query).is_some())
+                .filter(|e| fuzzy_folded(&e.label, &folded_query).is_some())
                 .cloned()
                 .collect();
             self.selected = self.selected.min(self.entries.len().saturating_sub(1));

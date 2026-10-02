@@ -9,9 +9,20 @@ impl Workspace {
     pub(super) fn diagnostic_entries(&self) -> Vec<crate::picker::Entry> {
         let mut items: Vec<_> = self.diagnostics.values().flatten().collect();
         if self.settings.tooling.diagnostics.severity_sort {
-            items.sort_by_key(|d| (d.severity, d.path.clone(), d.row, d.col));
+            items.sort_by(|a, b| {
+                a.severity
+                    .cmp(&b.severity)
+                    .then_with(|| a.path.cmp(&b.path))
+                    .then(a.row.cmp(&b.row))
+                    .then(a.col.cmp(&b.col))
+            });
         } else {
-            items.sort_by_key(|d| (d.path.clone(), d.row, d.col));
+            items.sort_by(|a, b| {
+                a.path
+                    .cmp(&b.path)
+                    .then(a.row.cmp(&b.row))
+                    .then(a.col.cmp(&b.col))
+            });
         }
         items
             .into_iter()
@@ -116,52 +127,51 @@ impl Workspace {
             }
         }
         let idle = self.last_input.elapsed().as_millis() >= self.settings.tooling.delay_ms as u128;
-        if idle {
-            for (id, e) in self.buffers.iter_mut().enumerate() {
-                let Some(path) = &e.buffer.path else {
-                    continue;
-                };
-                let dirty = e.buffer.dirty();
-                if self
-                    .synced
-                    .get(&id)
-                    .is_some_and(|(revision, stored, _, _)| {
-                        *revision == e.buffer.revision && stored == path
-                    })
-                {
-                    if self.saved_generations.get(&id).copied().unwrap_or(0)
-                        != e.buffer.save_generation
-                    {
-                        self.tools.saved(path.clone());
-                        self.saved_generations.insert(id, e.buffer.save_generation);
-                    }
-                    continue;
-                }
-                e.semantic.clear();
-                self.tool_version += 1;
-                let absolute =
-                    tooling::from_uri(&tooling::uri(path)).unwrap_or_else(|| path.clone());
-                self.versions.insert(absolute.clone(), self.tool_version);
-                self.synced.insert(
-                    id,
-                    (e.buffer.revision, path.clone(), self.tool_version, dirty),
-                );
-                self.tools.document(tooling::Document {
-                    path: absolute,
-                    version: self.tool_version,
-                    text: e.buffer.text().replace("\r\n", "\n"),
-                    filetype: self.settings.filetype(Some(path)),
-                    cursor: if e.mode == Mode::Insert {
-                        Some((e.buffer.row, e.buffer.col))
-                    } else {
-                        None
-                    },
-                });
+        for (id, e) in self.buffers.iter_mut().enumerate() {
+            let Some(path) = &e.buffer.path else {
+                continue;
+            };
+            let dirty = e.buffer.dirty();
+            if self
+                .synced
+                .get(&id)
+                .is_some_and(|(revision, stored, _, _)| {
+                    *revision == e.buffer.revision && stored == path
+                })
+            {
                 if self.saved_generations.get(&id).copied().unwrap_or(0) != e.buffer.save_generation
                 {
                     self.tools.saved(path.clone());
                     self.saved_generations.insert(id, e.buffer.save_generation);
                 }
+                continue;
+            }
+            e.semantic.clear();
+            self.tool_version += 1;
+            let absolute = if path.is_absolute() {
+                path.clone()
+            } else {
+                self.root.join(path)
+            };
+            self.versions.insert(absolute.clone(), self.tool_version);
+            self.synced.insert(
+                id,
+                (e.buffer.revision, path.clone(), self.tool_version, dirty),
+            );
+            self.tools.document(tooling::Document {
+                path: absolute,
+                version: self.tool_version,
+                text: e.buffer.text().replace("\r\n", "\n"),
+                filetype: self.settings.filetype(Some(path)),
+                cursor: if e.mode == Mode::Insert {
+                    Some((e.buffer.row, e.buffer.col))
+                } else {
+                    None
+                },
+            });
+            if self.saved_generations.get(&id).copied().unwrap_or(0) != e.buffer.save_generation {
+                self.tools.saved(path.clone());
+                self.saved_generations.insert(id, e.buffer.save_generation);
             }
         }
         for event in self.tools.poll() {
@@ -394,10 +404,45 @@ fn shift_offset(value: usize, delta: isize) -> usize {
     }
 }
 
+fn completion_indent(e: &Editor, item: &Completion) -> String {
+    let Some(line) = e.buffer.lines.get(item.start.0) else {
+        return String::new();
+    };
+    let indent: String = line.chars().take_while(|ch| ch.is_whitespace()).collect();
+    if item.start.1 >= indent.chars().count() {
+        indent
+    } else {
+        String::new()
+    }
+}
+
+fn indent_snippet(text: &str, stops: &mut [SnippetStop], indent: &str) -> String {
+    if indent.is_empty() || !text.contains('\n') {
+        return text.to_owned();
+    }
+    let width = indent.chars().count();
+    let extra_before =
+        |offset: usize| text.chars().take(offset).filter(|ch| *ch == '\n').count() * width;
+    for stop in stops {
+        let (start, end) = (stop.start, stop.end);
+        stop.start += extra_before(start);
+        stop.end += extra_before(end);
+    }
+    let mut out = String::with_capacity(text.len() + text.matches('\n').count() * indent.len());
+    for ch in text.chars() {
+        out.push(ch);
+        if ch == '\n' {
+            out.push_str(indent);
+        }
+    }
+    out
+}
+
 fn apply_completion(e: &mut Editor, item: &Completion) {
     let main_start = e.buffer.offset_at(item.start.0, item.start.1);
     let main_end = e.buffer.offset_at(item.end.0, item.end.1);
-    let (text, mut stops) = parse_snippet(&item.text);
+    let (parsed, mut stops) = parse_snippet(&item.text);
+    let text = indent_snippet(&parsed, &mut stops, &completion_indent(e, item));
     let mut shift = 0isize;
     let mut edits = vec![(main_start, main_end, text.clone())];
     for edit in &item.additional {
@@ -756,6 +801,33 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn multiline_snippet_inherits_completion_line_indentation() {
+        let mut e = Editor::new(Buffer::from_text("    fo"));
+        e.mode = Mode::Insert;
+        e.buffer.col = 6;
+        let item = Completion {
+            label: "for".into(),
+            text: "for (${1:condition}) {\n    ${2:body}\n}$0".into(),
+            start: (0, 4),
+            end: (0, 6),
+            additional: vec![],
+        };
+
+        apply_completion(&mut e, &item);
+        assert_eq!(
+            e.buffer.text(),
+            "    for (condition) {\n        body\n    }"
+        );
+        assert_eq!((e.buffer.row, e.buffer.col), (0, 9));
+
+        e.key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Tab,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!((e.buffer.row, e.buffer.col), (1, 8));
     }
 
     #[test]
